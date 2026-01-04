@@ -221,4 +221,456 @@ function Get-MailboxDetails {
 }
 
 function Export-MailboxBackup {
-    param([Parameter(Mandatory)][string]$
+    param([Parameter(Mandatory)][string]$Identity)
+
+    $details = Get-MailboxDetails -Identity $Identity
+    $safeId  = ($details.Mailbox.PrimarySmtpAddress.ToString() -replace '[^a-zA-Z0-9\.\-_@]','_')
+    $stamp   = Get-Date -Format "yyyyMMdd-HHmmss"
+    $path    = Join-Path $Script:ExportDir "$safeId-MailboxSOA-Backup-$stamp.json"
+
+    $details | ConvertTo-Json -Depth 6 | Set-Content -Path $path -Encoding UTF8
+    Write-Log "Export-MailboxBackup completed for '$Identity'. Path='$path'" "INFO"
+    return $path
+}
+
+function Set-MailboxSOACloudManaged {
+    param(
+        [Parameter(Mandatory)][string]$Identity,
+        [Parameter(Mandatory)][bool]$EnableCloudManaged
+    )
+    if (-not $Script:IsConnected) { throw "Not connected to Exchange Online." }
+
+    $targetValue = [bool]$EnableCloudManaged
+
+    # BEFORE
+    $before = Get-Mailbox -Identity $Identity -ErrorAction Stop |
+        Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
+
+    Write-Log "SOA change requested for '$Identity'. TargetIsExchangeCloudManaged=$targetValue (Before=$($before.IsExchangeCloudManaged); IsDirSynced=$($before.IsDirSynced))" "INFO"
+
+    if ($before.IsDirSynced -ne $true) {
+        $msg = "Mailbox '$Identity' is not DirSynced (IsDirSynced=$($before.IsDirSynced)). Change blocked."
+        Write-Log $msg "WARN"
+        throw $msg
+    }
+
+    if ($before.IsExchangeCloudManaged -eq $targetValue) {
+        $msg = "No change needed for '$Identity'. IsExchangeCloudManaged already '$targetValue'."
+        Write-Log $msg "INFO"
+        return $msg
+    }
+
+    # APPLY
+    try {
+        Set-Mailbox -Identity $Identity -IsExchangeCloudManaged $targetValue -ErrorAction Stop
+        Write-Log "Set-Mailbox executed for '$Identity' IsExchangeCloudManaged=$targetValue" "INFO"
+    } catch {
+        Write-Log "Set-Mailbox FAILED for '$Identity'. Error=$($_.Exception.Message)" "ERROR"
+        throw
+    }
+
+    # AFTER
+    $after = Get-Mailbox -Identity $Identity -ErrorAction Stop |
+        Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
+
+    $changed = ($after.IsExchangeCloudManaged -eq $targetValue)
+    Write-Log "SOA change result for '$Identity'. Before=$($before.IsExchangeCloudManaged) After=$($after.IsExchangeCloudManaged) Expected=$targetValue Success=$changed" "INFO"
+
+    if (-not $changed) {
+        return "Executed, but verification did not match expected value. Before='$($before.IsExchangeCloudManaged)' After='$($after.IsExchangeCloudManaged)' Expected='$targetValue'."
+    }
+
+    return "Updated. IsExchangeCloudManaged is now '$($after.IsExchangeCloudManaged)'."
+}
+#endregion
+
+#region GUI
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "$($Script:ToolName) - Exchange Online (IsExchangeCloudManaged)"
+$form.Size = New-Object System.Drawing.Size(980, 640)
+$form.StartPosition = "CenterScreen"
+
+# Top bar
+$btnConnect = New-Object System.Windows.Forms.Button
+$btnConnect.Text = "Connect"
+$btnConnect.Location = New-Object System.Drawing.Point(12, 12)
+$btnConnect.Size = New-Object System.Drawing.Size(110, 30)
+
+$btnDisconnect = New-Object System.Windows.Forms.Button
+$btnDisconnect.Text = "Disconnect"
+$btnDisconnect.Location = New-Object System.Drawing.Point(130, 12)
+$btnDisconnect.Size = New-Object System.Drawing.Size(110, 30)
+$btnDisconnect.Enabled = $false
+
+$lblConn = New-Object System.Windows.Forms.Label
+$lblConn.Text = "Status: Not connected"
+$lblConn.Location = New-Object System.Drawing.Point(260, 18)
+$lblConn.AutoSize = $true
+
+# Search
+$grpSearch = New-Object System.Windows.Forms.GroupBox
+$grpSearch.Text = "Search mailboxes (DisplayName, Alias, Primary SMTP)"
+$grpSearch.Location = New-Object System.Drawing.Point(12, 55)
+$grpSearch.Size = New-Object System.Drawing.Size(940, 120)
+
+$txtSearch = New-Object System.Windows.Forms.TextBox
+$txtSearch.Location = New-Object System.Drawing.Point(16, 30)
+$txtSearch.Size = New-Object System.Drawing.Size(720, 25)
+
+$btnSearch = New-Object System.Windows.Forms.Button
+$btnSearch.Text = "Search"
+$btnSearch.Location = New-Object System.Drawing.Point(750, 27)
+$btnSearch.Size = New-Object System.Drawing.Size(170, 30)
+$btnSearch.Enabled = $false
+
+$grid = New-Object System.Windows.Forms.DataGridView
+$grid.Location = New-Object System.Drawing.Point(16, 65)
+$grid.Size = New-Object System.Drawing.Size(904, 45)
+$grid.ReadOnly = $true
+$grid.AllowUserToAddRows = $false
+$grid.AllowUserToDeleteRows = $false
+$grid.SelectionMode = "FullRowSelect"
+$grid.MultiSelect = $false
+$grid.AutoSizeColumnsMode = "Fill"
+$grid.AutoGenerateColumns = $true
+
+# Details
+$grpDetails = New-Object System.Windows.Forms.GroupBox
+$grpDetails.Text = "Selected mailbox details"
+$grpDetails.Location = New-Object System.Drawing.Point(12, 185)
+$grpDetails.Size = New-Object System.Drawing.Size(940, 260)
+
+$txtDetails = New-Object System.Windows.Forms.TextBox
+$txtDetails.Location = New-Object System.Drawing.Point(16, 30)
+$txtDetails.Size = New-Object System.Drawing.Size(904, 165)
+$txtDetails.Multiline = $true
+$txtDetails.ScrollBars = "Vertical"
+$txtDetails.ReadOnly = $true
+
+$btnRefresh = New-Object System.Windows.Forms.Button
+$btnRefresh.Text = "Refresh details"
+$btnRefresh.Location = New-Object System.Drawing.Point(16, 205)
+$btnRefresh.Size = New-Object System.Drawing.Size(170, 32)
+$btnRefresh.Enabled = $false
+
+$btnBackup = New-Object System.Windows.Forms.Button
+$btnBackup.Text = "Export backup (JSON)"
+$btnBackup.Location = New-Object System.Drawing.Point(196, 205)
+$btnBackup.Size = New-Object System.Drawing.Size(190, 32)
+$btnBackup.Enabled = $false
+
+$btnEnableCloud = New-Object System.Windows.Forms.Button
+$btnEnableCloud.Text = "Enable cloud SOA (true)"
+$btnEnableCloud.Location = New-Object System.Drawing.Point(396, 205)
+$btnEnableCloud.Size = New-Object System.Drawing.Size(210, 32)
+$btnEnableCloud.Enabled = $false
+
+$btnRevertOnPrem = New-Object System.Windows.Forms.Button
+$btnRevertOnPrem.Text = "Revert to on-prem SOA (false)"
+$btnRevertOnPrem.Location = New-Object System.Drawing.Point(616, 205)
+$btnRevertOnPrem.Size = New-Object System.Drawing.Size(250, 32)
+$btnRevertOnPrem.Enabled = $false
+
+# Footer info
+$lblFoot = New-Object System.Windows.Forms.Label
+$lblFoot.Location = New-Object System.Drawing.Point(12, 460)
+$lblFoot.Size = New-Object System.Drawing.Size(940, 130)
+$lblFoot.Text =
+"Notes:
+- Single logfile (append): $($Script:LogFile)
+- 'SOA (Exchange Attributes)' indicator is based on IsExchangeCloudManaged:
+    ☁ Online  = Exchange Online is SOA for Exchange attributes
+    🏢 On-Prem = On-premises is SOA for Exchange attributes
+    ? Unknown = Not set/unknown
+Exports: $($Script:ExportDir)
+"
+$lblFoot.AutoSize = $false
+
+$form.Controls.AddRange(@($btnConnect,$btnDisconnect,$lblConn,$grpSearch,$grpDetails,$lblFoot))
+$grpSearch.Controls.AddRange(@($txtSearch,$btnSearch,$grid))
+$grpDetails.Controls.AddRange(@($txtDetails,$btnRefresh,$btnBackup,$btnEnableCloud,$btnRevertOnPrem))
+
+$Script:SelectedIdentity = $null
+
+function Set-UiConnectedState {
+    param([bool]$Connected)
+
+    $btnConnect.Enabled        = -not $Connected
+    $btnDisconnect.Enabled     = $Connected
+    $btnSearch.Enabled         = $Connected
+
+    $btnRefresh.Enabled        = $false
+    $btnBackup.Enabled         = $false
+    $btnEnableCloud.Enabled    = $false
+    $btnRevertOnPrem.Enabled   = $false
+
+    if ($Connected) {
+        $lblConn.Text = "Status: Connected to Exchange Online"
+    } else {
+        $lblConn.Text = "Status: Not connected"
+        $grid.DataSource = $null
+        $txtDetails.Clear()
+        $Script:SelectedIdentity = $null
+    }
+}
+
+function Show-Details {
+    param([string]$Identity)
+
+    $details = Get-MailboxDetails -Identity $Identity
+    $mbx = $details.Mailbox
+    $usr = $details.User
+
+    $soa = Get-SOAIndicator $mbx.IsExchangeCloudManaged
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("Mailbox:")
+    $lines.Add("  DisplayName               : $($mbx.DisplayName)")
+    $lines.Add("  PrimarySmtpAddress        : $($mbx.PrimarySmtpAddress)")
+    $lines.Add("  RecipientTypeDetails      : $($mbx.RecipientTypeDetails)")
+    $lines.Add("  IsDirSynced               : $($mbx.IsDirSynced)")
+    $lines.Add("  IsExchangeCloudManaged    : $($mbx.IsExchangeCloudManaged)")
+    $lines.Add("  SOA (Exchange Attributes) : $soa")
+    $lines.Add("  ExchangeGuid              : $($mbx.ExchangeGuid)")
+    $lines.Add("  ExternalDirectoryObjectId : $($mbx.ExternalDirectoryObjectId)")
+
+    if ($usr) {
+        $lines.Add("")
+        $lines.Add("User:")
+        $lines.Add("  UserPrincipalName         : $($usr.UserPrincipalName)")
+        $lines.Add("  ImmutableId               : $($usr.ImmutableId)")
+        $lines.Add("  WhenChangedUTC            : $($usr.WhenChangedUTC)")
+    }
+
+    $txtDetails.Lines = $lines.ToArray()
+
+    $btnRefresh.Enabled      = $true
+    $btnBackup.Enabled       = $true
+    $btnEnableCloud.Enabled  = $true
+    $btnRevertOnPrem.Enabled = $true
+}
+
+# Events
+$btnConnect.Add_Click({
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        if (Connect-EXO) {
+            Set-UiConnectedState -Connected $true
+        }
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+
+$btnDisconnect.Add_Click({
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        Disconnect-EXO
+        Set-UiConnectedState -Connected $false
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+
+$btnSearch.Add_Click({
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        $q = $txtSearch.Text
+        Write-Log "UI Search clicked. Query='$q'" "INFO"
+        $results = Search-Mailboxes -QueryText $q -Max 200
+
+        if ($results.Count -eq 0) {
+            $grid.DataSource = $null
+            $txtDetails.Text = "No results."
+            $Script:SelectedIdentity = $null
+            $btnRefresh.Enabled = $false
+            $btnBackup.Enabled  = $false
+            $btnEnableCloud.Enabled = $false
+            $btnRevertOnPrem.Enabled= $false
+            return
+        }
+
+        $grid.DataSource = $results
+        $txtDetails.Text = "Select a mailbox row to see details."
+    } catch {
+        Write-Log "UI Search failed: $($_.Exception.Message)" "ERROR"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Search failed.`n`n$($_.Exception.Message)",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+
+$grid.Add_SelectionChanged({
+    try {
+        if ($grid.SelectedRows.Count -gt 0) {
+            $row = $grid.SelectedRows[0]
+            $smtp = $row.Cells["PrimarySmtpAddress"].Value
+            if ($smtp) {
+                $Script:SelectedIdentity = $smtp.ToString()
+                Write-Log "UI selection changed. SelectedIdentity='$($Script:SelectedIdentity)'" "INFO"
+                Show-Details -Identity $Script:SelectedIdentity
+            }
+        }
+    } catch {
+        Write-Log "SelectionChanged warning: $($_.Exception.Message)" "WARN"
+    }
+})
+
+$btnRefresh.Add_Click({
+    if (-not $Script:SelectedIdentity) { return }
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        Write-Log "UI Refresh clicked. Identity='$($Script:SelectedIdentity)'" "INFO"
+        Show-Details -Identity $Script:SelectedIdentity
+    } catch {
+        Write-Log "Refresh failed: $($_.Exception.Message)" "ERROR"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Refresh failed.`n`n$($_.Exception.Message)",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+
+$btnBackup.Add_Click({
+    if (-not $Script:SelectedIdentity) { return }
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        Write-Log "UI Backup clicked. Identity='$($Script:SelectedIdentity)'" "INFO"
+        $path = Export-MailboxBackup -Identity $Script:SelectedIdentity
+        [System.Windows.Forms.MessageBox]::Show(
+            "Backup exported:`n$path",
+            "Export Complete",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+    } catch {
+        Write-Log "Backup export failed: $($_.Exception.Message)" "ERROR"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Backup export failed.`n`n$($_.Exception.Message)",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+
+$btnEnableCloud.Add_Click({
+    if (-not $Script:SelectedIdentity) { return }
+
+    $confirm = [System.Windows.Forms.MessageBox]::Show(
+        "Enable cloud SOA for Exchange attributes for:`n`n$($Script:SelectedIdentity)`n`nThis sets IsExchangeCloudManaged = TRUE.",
+        "Confirm",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+    if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-Log "Enable cloud SOA cancelled by user. Identity='$($Script:SelectedIdentity)'" "INFO"
+        return
+    }
+
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        Write-Log "Enable cloud SOA initiated. Identity='$($Script:SelectedIdentity)'" "INFO"
+        $msg = Set-MailboxSOACloudManaged -Identity $Script:SelectedIdentity -EnableCloudManaged $true
+        [System.Windows.Forms.MessageBox]::Show(
+            $msg,
+            "Done",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+        Show-Details -Identity $Script:SelectedIdentity
+        $btnSearch.PerformClick()
+    } catch {
+        Write-Log "Enable cloud SOA failed: $($_.Exception.Message)" "ERROR"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Enable cloud SOA failed.`n`n$($_.Exception.Message)",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+
+$btnRevertOnPrem.Add_Click({
+    if (-not $Script:SelectedIdentity) { return }
+
+    $confirm = [System.Windows.Forms.MessageBox]::Show(
+        "Revert SOA back to on-prem for:`n`n$($Script:SelectedIdentity)`n`nThis sets IsExchangeCloudManaged = FALSE.`n`nWARNING: Next sync may overwrite cloud values with on-prem values.",
+        "Confirm",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+    if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-Log "Revert to on-prem SOA cancelled by user. Identity='$($Script:SelectedIdentity)'" "INFO"
+        return
+    }
+
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        Write-Log "Revert to on-prem SOA initiated. Identity='$($Script:SelectedIdentity)'" "INFO"
+
+        $backupPrompt = [System.Windows.Forms.MessageBox]::Show(
+            "Do you want to export a backup (JSON) before reverting?",
+            "Backup recommended",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+        if ($backupPrompt -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $path = Export-MailboxBackup -Identity $Script:SelectedIdentity
+            Write-Log "Backup created before revert. Identity='$($Script:SelectedIdentity)' Path='$path'" "INFO"
+        } else {
+            Write-Log "Backup skipped before revert. Identity='$($Script:SelectedIdentity)'" "WARN"
+        }
+
+        $msg = Set-MailboxSOACloudManaged -Identity $Script:SelectedIdentity -EnableCloudManaged $false
+        [System.Windows.Forms.MessageBox]::Show(
+            $msg,
+            "Done",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+
+        Show-Details -Identity $Script:SelectedIdentity
+        $btnSearch.PerformClick()
+    } catch {
+        Write-Log "Revert to on-prem SOA failed: $($_.Exception.Message)" "ERROR"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Revert failed.`n`n$($_.Exception.Message)",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+
+$form.Add_FormClosing({
+    Write-Log "Application closing requested." "INFO"
+    try { Disconnect-EXO } catch {}
+    Write-Log "Application closed." "INFO"
+})
+
+# Initialize UI
+Set-UiConnectedState -Connected $false
+Write-Log "$($Script:ToolName) started." "INFO"
+
+[System.Windows.Forms.Application]::Run($form)
+#endregion
