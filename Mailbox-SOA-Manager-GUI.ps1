@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   GUI tool to view and change mailbox Exchange attribute SOA state via IsExchangeCloudManaged:
-    - Enable cloud management  : IsExchangeCloudManaged = $true
+    - Enable cloud management     : IsExchangeCloudManaged = $true
     - Revert to on-prem management: IsExchangeCloudManaged = $false
   Includes SOA indicator column in the list and detailed change logging.
 
@@ -22,10 +22,10 @@ REQUIREMENTS
   - Module: ExchangeOnlineManagement
 
 AUTHOR
-  Peter
+  Peter Schmidt
 
 VERSION
-  1.4 (2026-01-04)
+  1.5 (2026-01-04)
 #>
 
 # --- Load WinForms early (so we can show MessageBoxes even before GUI starts) ---
@@ -42,13 +42,12 @@ try {
 $Script:ToolName     = "Mailbox SOA Manager"
 $Script:RunId        = [Guid]::NewGuid().ToString()
 $Script:LogDir       = Join-Path -Path (Get-Location) -ChildPath "Logs"
-$Script:ExportDir    = Join-Path -Path (Get-Location) -ChildPath "Exports"
+$Script:ExportDir    = Join-Path -Path (Get-Location) -ChildPath "Exports"   # created on-demand
 $Script:LogFile      = Join-Path -Path $Script:LogDir -ChildPath "MailboxSOAManager.log"
 $Script:IsConnected  = $false
 $Script:ExoActor     = $null  # populated after connect (best-effort)
 
 New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null
-New-Item -ItemType Directory -Path $Script:ExportDir -Force | Out-Null
 #endregion
 
 #region Logging (single logfile, timestamp per line)
@@ -79,7 +78,7 @@ function Ensure-STA {
         if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path $scriptPath)) {
             [System.Windows.Forms.MessageBox]::Show(
                 "This GUI must run in STA mode, but the script path could not be detected for auto-relaunch.`n`nPlease run it like:`n  powershell.exe -STA -File .\MailboxSOAManager-GUI.ps1",
-                "Mailbox SOA Manager",
+                $Script:ToolName,
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Warning
             ) | Out-Null
@@ -87,23 +86,16 @@ function Ensure-STA {
         }
 
         $exe = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
-
-        $args = @(
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-STA",
-            "-File", "`"$scriptPath`""
-        ) -join " "
+        $args = @("-NoProfile","-ExecutionPolicy","Bypass","-STA","-File","`"$scriptPath`"") -join " "
 
         Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory (Split-Path -Parent $scriptPath) | Out-Null
-
         Write-Log "Launched new process: $exe $args" "INFO"
         return $false
     } catch {
         Write-Log "Ensure-STA failed: $($_.Exception.Message)" "ERROR"
         [System.Windows.Forms.MessageBox]::Show(
             "Failed to validate STA mode.`n`n$($_.Exception.Message)",
-            "Mailbox SOA Manager",
+            $Script:ToolName,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
         ) | Out-Null
@@ -251,16 +243,39 @@ function Get-MailboxDetails {
     }
 }
 
-function Export-MailboxBackup {
+function Export-MailboxSOASettings {
     param([Parameter(Mandatory)][string]$Identity)
 
-    $details = Get-MailboxDetails -Identity $Identity
-    $safeId  = ($details.Mailbox.PrimarySmtpAddress.ToString() -replace '[^a-zA-Z0-9\.\-_@]','_')
-    $stamp   = Get-Date -Format "yyyyMMdd-HHmmss"
-    $path    = Join-Path $Script:ExportDir "$safeId-MailboxSOA-Backup-$stamp.json"
+    # Create Exports folder ONLY when exporting
+    New-Item -ItemType Directory -Path $Script:ExportDir -Force | Out-Null
 
-    $details | ConvertTo-Json -Depth 6 | Set-Content -Path $path -Encoding UTF8
-    Write-Log "Export-MailboxBackup completed for '$Identity'. Path='$path'" "INFO"
+    $details = Get-MailboxDetails -Identity $Identity
+    $mbx = $details.Mailbox
+    $soa = Get-SOAIndicator $mbx.IsExchangeCloudManaged
+
+    $safeId  = ($mbx.PrimarySmtpAddress.ToString() -replace '[^a-zA-Z0-9\.\-_@]','_')
+    $stamp   = Get-Date -Format "yyyyMMdd-HHmmss"
+    $path    = Join-Path $Script:ExportDir "$safeId-MailboxSOASettings-$stamp.json"
+
+    $export = [PSCustomObject]@{
+        ExportType   = "Mailbox SOA Settings"
+        ExportedAt   = (Get-Date).ToString("o")
+        ToolName     = $Script:ToolName
+        RunId        = $Script:RunId
+        Identity     = $Identity
+        SOASettings  = [PSCustomObject]@{
+            PrimarySmtpAddress      = $mbx.PrimarySmtpAddress
+            DisplayName             = $mbx.DisplayName
+            IsDirSynced             = $mbx.IsDirSynced
+            IsExchangeCloudManaged  = $mbx.IsExchangeCloudManaged
+            SOAIndicator            = $soa
+        }
+        MailboxDetails = $mbx
+        UserDetails    = $details.User
+    }
+
+    $export | ConvertTo-Json -Depth 6 | Set-Content -Path $path -Encoding UTF8
+    Write-Log "Export-MailboxSOASettings completed for '$Identity'. Path='$path' SOA='$soa' IsExchangeCloudManaged='$($mbx.IsExchangeCloudManaged)'" "INFO"
     return $path
 }
 
@@ -273,7 +288,6 @@ function Set-MailboxSOACloudManaged {
 
     $targetValue = [bool]$EnableCloudManaged
 
-    # BEFORE
     $before = Get-Mailbox -Identity $Identity -ErrorAction Stop |
         Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
 
@@ -291,7 +305,6 @@ function Set-MailboxSOACloudManaged {
         return $msg
     }
 
-    # APPLY
     try {
         Set-Mailbox -Identity $Identity -IsExchangeCloudManaged $targetValue -ErrorAction Stop
         Write-Log "Set-Mailbox executed for '$Identity' IsExchangeCloudManaged=$targetValue" "INFO"
@@ -300,7 +313,6 @@ function Set-MailboxSOACloudManaged {
         throw
     }
 
-    # AFTER
     $after = Get-Mailbox -Identity $Identity -ErrorAction Stop |
         Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
 
@@ -315,7 +327,7 @@ function Set-MailboxSOACloudManaged {
 }
 #endregion
 
-#region GUI (WinForms)
+#region GUI
 try {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "$($Script:ToolName) - Exchange Online (IsExchangeCloudManaged)"
@@ -385,22 +397,22 @@ try {
     $btnRefresh.Size = New-Object System.Drawing.Size(170, 32)
     $btnRefresh.Enabled = $false
 
-    $btnBackup = New-Object System.Windows.Forms.Button
-    $btnBackup.Text = "Export backup (JSON)"
-    $btnBackup.Location = New-Object System.Drawing.Point(196, 205)
-    $btnBackup.Size = New-Object System.Drawing.Size(190, 32)
-    $btnBackup.Enabled = $false
+    $btnExportSOA = New-Object System.Windows.Forms.Button
+    $btnExportSOA.Text = "Export current mailbox SOA settings (JSON)"
+    $btnExportSOA.Location = New-Object System.Drawing.Point(196, 205)
+    $btnExportSOA.Size = New-Object System.Drawing.Size(300, 32)
+    $btnExportSOA.Enabled = $false
 
     $btnEnableCloud = New-Object System.Windows.Forms.Button
     $btnEnableCloud.Text = "Enable cloud SOA (true)"
-    $btnEnableCloud.Location = New-Object System.Drawing.Point(396, 205)
-    $btnEnableCloud.Size = New-Object System.Drawing.Size(210, 32)
+    $btnEnableCloud.Location = New-Object System.Drawing.Point(506, 205)
+    $btnEnableCloud.Size = New-Object System.Drawing.Size(180, 32)
     $btnEnableCloud.Enabled = $false
 
     $btnRevertOnPrem = New-Object System.Windows.Forms.Button
     $btnRevertOnPrem.Text = "Revert to on-prem SOA (false)"
-    $btnRevertOnPrem.Location = New-Object System.Drawing.Point(616, 205)
-    $btnRevertOnPrem.Size = New-Object System.Drawing.Size(250, 32)
+    $btnRevertOnPrem.Location = New-Object System.Drawing.Point(696, 205)
+    $btnRevertOnPrem.Size = New-Object System.Drawing.Size(224, 32)
     $btnRevertOnPrem.Enabled = $false
 
     # Footer
@@ -410,19 +422,17 @@ try {
     $lblFoot.Text =
 "Notes:
 - Single logfile (append): $($Script:LogFile)
-- Each log line is timestamped and includes RunId + Actor.
 - 'SOA (Exchange Attributes)' indicator is based on IsExchangeCloudManaged:
     ☁ Online  = Exchange Online is SOA for Exchange attributes
     🏢 On-Prem = On-premises is SOA for Exchange attributes
     ? Unknown = Not set/unknown
-Exports: $($Script:ExportDir)
+- Export button = Export CURRENT mailbox SOA settings to JSON (saved under .\Exports only when you export)
 "
     $lblFoot.AutoSize = $false
 
-    # Add controls
     $form.Controls.AddRange(@($btnConnect,$btnDisconnect,$lblConn,$grpSearch,$grpDetails,$lblFoot))
     $grpSearch.Controls.AddRange(@($txtSearch,$btnSearch,$grid))
-    $grpDetails.Controls.AddRange(@($txtDetails,$btnRefresh,$btnBackup,$btnEnableCloud,$btnRevertOnPrem))
+    $grpDetails.Controls.AddRange(@($txtDetails,$btnRefresh,$btnExportSOA,$btnEnableCloud,$btnRevertOnPrem))
 
     # State
     $Script:SelectedIdentity = $null
@@ -435,7 +445,7 @@ Exports: $($Script:ExportDir)
         $btnSearch.Enabled         = $Connected
 
         $btnRefresh.Enabled        = $false
-        $btnBackup.Enabled         = $false
+        $btnExportSOA.Enabled      = $false
         $btnEnableCloud.Enabled    = $false
         $btnRevertOnPrem.Enabled   = $false
 
@@ -477,10 +487,16 @@ Exports: $($Script:ExportDir)
             $lines.Add("  WhenChangedUTC            : $($usr.WhenChangedUTC)")
         }
 
+        $lines.Add("")
+        $lines.Add("Export:")
+        $lines.Add("  Export current mailbox SOA settings (JSON) will include:")
+        $lines.Add("    - IsDirSynced, IsExchangeCloudManaged, SOA indicator")
+        $lines.Add("    - Mailbox/User identifiers for traceability")
+
         $txtDetails.Lines = $lines.ToArray()
 
         $btnRefresh.Enabled      = $true
-        $btnBackup.Enabled       = $true
+        $btnExportSOA.Enabled    = $true
         $btnEnableCloud.Enabled  = $true
         $btnRevertOnPrem.Enabled = $true
     }
@@ -488,9 +504,8 @@ Exports: $($Script:ExportDir)
     # Events
     $btnConnect.Add_Click({
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-        try {
-            if (Connect-EXO) { Set-UiConnectedState -Connected $true }
-        } finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
+        try { if (Connect-EXO) { Set-UiConnectedState -Connected $true } }
+        finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
     })
 
     $btnDisconnect.Add_Click({
@@ -513,7 +528,7 @@ Exports: $($Script:ExportDir)
                 $txtDetails.Text = "No results."
                 $Script:SelectedIdentity = $null
                 $btnRefresh.Enabled = $false
-                $btnBackup.Enabled  = $false
+                $btnExportSOA.Enabled = $false
                 $btnEnableCloud.Enabled = $false
                 $btnRevertOnPrem.Enabled= $false
                 return
@@ -565,22 +580,22 @@ Exports: $($Script:ExportDir)
         } finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
     })
 
-    $btnBackup.Add_Click({
+    $btnExportSOA.Add_Click({
         if (-not $Script:SelectedIdentity) { return }
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         try {
-            Write-Log "UI Backup clicked. Identity='$($Script:SelectedIdentity)'" "INFO"
-            $path = Export-MailboxBackup -Identity $Script:SelectedIdentity
+            Write-Log "UI Export current mailbox SOA settings clicked. Identity='$($Script:SelectedIdentity)'" "INFO"
+            $path = Export-MailboxSOASettings -Identity $Script:SelectedIdentity
             [System.Windows.Forms.MessageBox]::Show(
-                "Backup exported:`n$path",
+                "Exported CURRENT mailbox SOA settings to:`n$path",
                 "Export Complete",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information
             ) | Out-Null
         } catch {
-            Write-Log "Backup export failed: $($_.Exception.Message)" "ERROR"
+            Write-Log "Export current mailbox SOA settings failed: $($_.Exception.Message)" "ERROR"
             [System.Windows.Forms.MessageBox]::Show(
-                "Backup export failed.`n`n$($_.Exception.Message)",
+                "Export failed.`n`n$($_.Exception.Message)",
                 "Error",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error
@@ -629,7 +644,7 @@ Exports: $($Script:ExportDir)
         if (-not $Script:SelectedIdentity) { return }
 
         $confirm = [System.Windows.Forms.MessageBox]::Show(
-            "Revert SOA back to on-prem for:`n`n$($Script:SelectedIdentity)`n`nThis sets IsExchangeCloudManaged = FALSE.`n`nWARNING: Next sync may overwrite cloud values with on-prem values.",
+            "Revert SOA back to on-prem for:`n`n$($Script:SelectedIdentity)`n`nThis sets IsExchangeCloudManaged = FALSE.",
             "Confirm",
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Warning
@@ -643,17 +658,17 @@ Exports: $($Script:ExportDir)
         try {
             Write-Log "Revert to on-prem SOA initiated. Identity='$($Script:SelectedIdentity)'" "INFO"
 
-            $backupPrompt = [System.Windows.Forms.MessageBox]::Show(
-                "Do you want to export a backup (JSON) before reverting?",
-                "Backup recommended",
+            $exportPrompt = [System.Windows.Forms.MessageBox]::Show(
+                "Do you want to export CURRENT mailbox SOA settings (JSON) before reverting?",
+                "Export recommended",
                 [System.Windows.Forms.MessageBoxButtons]::YesNo,
                 [System.Windows.Forms.MessageBoxIcon]::Question
             )
-            if ($backupPrompt -eq [System.Windows.Forms.DialogResult]::Yes) {
-                $path = Export-MailboxBackup -Identity $Script:SelectedIdentity
-                Write-Log "Backup created before revert. Identity='$($Script:SelectedIdentity)' Path='$path'" "INFO"
+            if ($exportPrompt -eq [System.Windows.Forms.DialogResult]::Yes) {
+                $path = Export-MailboxSOASettings -Identity $Script:SelectedIdentity
+                Write-Log "Export created before revert. Identity='$($Script:SelectedIdentity)' Path='$path'" "INFO"
             } else {
-                Write-Log "Backup skipped before revert. Identity='$($Script:SelectedIdentity)'" "WARN"
+                Write-Log "Export skipped before revert. Identity='$($Script:SelectedIdentity)'" "WARN"
             }
 
             $msg = Set-MailboxSOACloudManaged -Identity $Script:SelectedIdentity -EnableCloudManaged $false
@@ -683,7 +698,6 @@ Exports: $($Script:ExportDir)
         Write-Log "Application closed." "INFO"
     })
 
-    # Init + Run
     Set-UiConnectedState -Connected $false
     Write-Log "$($Script:ToolName) GUI starting (Application.Run)..." "INFO"
     [System.Windows.Forms.Application]::Run($form)
@@ -692,7 +706,7 @@ Exports: $($Script:ExportDir)
     Write-Log "FATAL: GUI failed to start. Error=$($_.Exception.Message)" "ERROR"
     [System.Windows.Forms.MessageBox]::Show(
         "GUI failed to start.`n`n$($_.Exception.Message)`n`nCheck log:`n$($Script:LogFile)",
-        "Mailbox SOA Manager",
+        $Script:ToolName,
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error
     ) | Out-Null
