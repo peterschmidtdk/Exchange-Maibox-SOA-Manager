@@ -11,28 +11,23 @@
     - View IsDirSynced + IsExchangeCloudManaged state
     - Enable cloud management (IsExchangeCloudManaged = $true)
     - Revert to on-premises management (IsExchangeCloudManaged = $false)
+    - Show SOA indicator in list: "SOA (Exchange Attributes)" = Online / On-Prem / Unknown
     - Export a small backup (JSON) of mailbox + user properties before reverting
-
-  Microsoft reference:
-    - Set-Mailbox -Identity <User> -IsExchangeCloudManaged $true/$false
-    - Requires appropriate admin roles (Exchange Admin recommended)
-    - For Entra Connect Sync tenants, Microsoft recommends Entra Connect Sync 2.5.190.0+,
-      and waiting after on-prem changes before switching a mailbox to cloud-managed. :contentReference[oaicite:1]{index=1}
 
 IMPORTANT NOTES
   - This does NOT migrate mailboxes. It only changes where Exchange *attributes* are managed.
-  - After you set IsExchangeCloudManaged=$false, next sync cycle will overwrite cloud values
-    with on-prem values (per Microsoft). Backup/export any needed cloud-only changes first. :contentReference[oaicite:2]{index=2}
+  - After you set IsExchangeCloudManaged=$false, next sync cycle can overwrite cloud values
+    with on-prem values. Backup/export any needed cloud-only changes first.
 
 REQUIREMENTS
   - Windows PowerShell 5.1 OR PowerShell 7+ started with -STA
   - Module: ExchangeOnlineManagement
 
 AUTHOR
-  Peter
+  Peter Schmidt (msdigest.net)
 
 VERSION
-  1.0 (2026-01-02)
+  1.1 (2026-01-04)
 #>
 
 #region Safety / STA check
@@ -51,9 +46,9 @@ try {
 #endregion
 
 #region Globals
-$Script:LogDir     = Join-Path -Path (Get-Location) -ChildPath "Logs"
-$Script:ExportDir  = Join-Path -Path (Get-Location) -ChildPath "Exports"
-$Script:LogFile    = Join-Path -Path $Script:LogDir -ChildPath "SOA-MailboxTool.log"
+$Script:LogDir      = Join-Path -Path (Get-Location) -ChildPath "Logs"
+$Script:ExportDir   = Join-Path -Path (Get-Location) -ChildPath "Exports"
+$Script:LogFile     = Join-Path -Path $Script:LogDir -ChildPath "SOA-MailboxTool.log"
 $Script:IsConnected = $false
 
 New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null
@@ -98,6 +93,16 @@ function Ensure-Module {
 
     Import-Module $Name -ErrorAction Stop
     Write-Log "Module loaded: $Name" "INFO"
+}
+#endregion
+
+#region SOA indicator helper
+function Get-SOAIndicator {
+    param([object]$IsExchangeCloudManaged)
+
+    if ($IsExchangeCloudManaged -eq $true)  { return "☁ Online" }
+    if ($IsExchangeCloudManaged -eq $false) { return "🏢 On-Prem" }
+    return "? Unknown"
 }
 #endregion
 
@@ -150,11 +155,18 @@ function Search-Mailboxes {
     $q = $QueryText.Trim()
     if ([string]::IsNullOrWhiteSpace($q)) { return @() }
 
-    # Use OPATH filter for performance (best effort)
+    # OPATH filter for performance (best effort)
     $filter = "DisplayName -like '*$q*' -or Alias -like '*$q*' -or PrimarySmtpAddress -like '*$q*'"
 
     $items = Get-Mailbox -ResultSize $Max -Filter $filter -ErrorAction Stop |
-        Select-Object DisplayName,Alias,PrimarySmtpAddress,RecipientTypeDetails,IsDirSynced,IsExchangeCloudManaged
+        Select-Object `
+            DisplayName,
+            Alias,
+            PrimarySmtpAddress,
+            RecipientTypeDetails,
+            IsDirSynced,
+            IsExchangeCloudManaged,
+            @{Name="SOA (Exchange Attributes)"; Expression={ Get-SOAIndicator $_.IsExchangeCloudManaged }}
 
     return @($items)
 }
@@ -167,7 +179,6 @@ function Get-MailboxDetails {
     $mbx = Get-Mailbox -Identity $Identity -ErrorAction Stop |
         Select-Object DisplayName,Alias,PrimarySmtpAddress,RecipientTypeDetails,IsDirSynced,IsExchangeCloudManaged,ExchangeGuid,ExternalDirectoryObjectId
 
-    # Get-User gives some additional attributes that admins often want to backup/see
     $usr = $null
     try {
         $usr = Get-User -Identity $Identity -ErrorAction Stop |
@@ -206,7 +217,6 @@ function Set-MailboxSOACloudManaged {
 
     $targetValue = [bool]$EnableCloudManaged
 
-    # Pre-check
     $mbx = Get-Mailbox -Identity $Identity -ErrorAction Stop |
         Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
 
@@ -277,6 +287,7 @@ $grid.AllowUserToDeleteRows = $false
 $grid.SelectionMode = "FullRowSelect"
 $grid.MultiSelect = $false
 $grid.AutoSizeColumnsMode = "Fill"
+$grid.AutoGenerateColumns = $true
 
 # Details
 $grpDetails = New-Object System.Windows.Forms.GroupBox
@@ -321,9 +332,10 @@ $lblFoot.Location = New-Object System.Drawing.Point(12, 460)
 $lblFoot.Size = New-Object System.Drawing.Size(940, 130)
 $lblFoot.Text =
 "Notes:
-- This tool changes IsExchangeCloudManaged only (does not migrate mailboxes).
-- Before enabling cloud SOA, Microsoft recommends allowing your normal sync cycle + 24 hours after on-prem mailbox attribute changes.
-- Before reverting to on-prem SOA, export/backup cloud-side changes you want to keep; next sync will overwrite cloud values with on-prem values.
+- List includes 'SOA (Exchange Attributes)' indicator based on IsExchangeCloudManaged:
+    ☁ Online  = Exchange Online is SOA for Exchange attributes
+    🏢 On-Prem = On-premises is SOA for Exchange attributes
+    ? Unknown = Not set/unknown
 Log: $($Script:LogFile)
 Exports: $($Script:ExportDir)
 "
@@ -340,14 +352,14 @@ $Script:SelectedIdentity = $null
 function Set-UiConnectedState {
     param([bool]$Connected)
 
-    $btnConnect.Enabled    = -not $Connected
-    $btnDisconnect.Enabled = $Connected
-    $btnSearch.Enabled     = $Connected
+    $btnConnect.Enabled        = -not $Connected
+    $btnDisconnect.Enabled     = $Connected
+    $btnSearch.Enabled         = $Connected
 
-    $btnRefresh.Enabled    = $false
-    $btnBackup.Enabled     = $false
-    $btnEnableCloud.Enabled= $false
-    $btnRevertOnPrem.Enabled= $false
+    $btnRefresh.Enabled        = $false
+    $btnBackup.Enabled         = $false
+    $btnEnableCloud.Enabled    = $false
+    $btnRevertOnPrem.Enabled   = $false
 
     if ($Connected) {
         $lblConn.Text = "Status: Connected to Exchange Online"
@@ -366,6 +378,8 @@ function Show-Details {
     $mbx = $details.Mailbox
     $usr = $details.User
 
+    $soa = Get-SOAIndicator $mbx.IsExchangeCloudManaged
+
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("Mailbox:")
     $lines.Add("  DisplayName              : $($mbx.DisplayName)")
@@ -373,6 +387,7 @@ function Show-Details {
     $lines.Add("  RecipientTypeDetails     : $($mbx.RecipientTypeDetails)")
     $lines.Add("  IsDirSynced              : $($mbx.IsDirSynced)")
     $lines.Add("  IsExchangeCloudManaged   : $($mbx.IsExchangeCloudManaged)")
+    $lines.Add("  SOA (Exchange Attributes) : $soa")
     $lines.Add("  ExchangeGuid             : $($mbx.ExchangeGuid)")
     $lines.Add("  ExternalDirectoryObjectId: $($mbx.ExternalDirectoryObjectId)")
 
@@ -386,10 +401,10 @@ function Show-Details {
 
     $txtDetails.Lines = $lines.ToArray()
 
-    $btnRefresh.Enabled     = $true
-    $btnBackup.Enabled      = $true
-    $btnEnableCloud.Enabled = $true
-    $btnRevertOnPrem.Enabled= $true
+    $btnRefresh.Enabled      = $true
+    $btnBackup.Enabled       = $true
+    $btnEnableCloud.Enabled  = $true
+    $btnRevertOnPrem.Enabled = $true
 }
 
 # Events
@@ -525,6 +540,8 @@ $btnEnableCloud.Add_Click({
             [System.Windows.Forms.MessageBoxIcon]::Information
         ) | Out-Null
         Show-Details -Identity $Script:SelectedIdentity
+        # refresh list row values
+        $btnSearch.PerformClick()
     } catch {
         Write-Log "Enable cloud SOA failed: $($_.Exception.Message)" "ERROR"
         [System.Windows.Forms.MessageBox]::Show(
@@ -551,7 +568,6 @@ $btnRevertOnPrem.Add_Click({
 
     $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     try {
-        # Encourage backup before revert
         $backupPrompt = [System.Windows.Forms.MessageBox]::Show(
             "Do you want to export a backup (JSON) before reverting?",
             "Backup recommended",
@@ -572,6 +588,8 @@ $btnRevertOnPrem.Add_Click({
         ) | Out-Null
 
         Show-Details -Identity $Script:SelectedIdentity
+        # refresh list row values
+        $btnSearch.PerformClick()
     } catch {
         Write-Log "Revert to on-prem SOA failed: $($_.Exception.Message)" "ERROR"
         [System.Windows.Forms.MessageBox]::Show(
