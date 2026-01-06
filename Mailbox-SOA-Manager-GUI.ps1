@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Exchange Mailbox SOA Manager (GUI) for Exchange Online - Cloud-managed Exchange attributes (SOA) toggle.
+  Mailbox SOA Manager (GUI) for Exchange Online - Cloud-managed Exchange attributes (SOA) toggle.
 
 .DESCRIPTION
   GUI tool to view and change mailbox Exchange attribute SOA state via IsExchangeCloudManaged:
@@ -17,10 +17,11 @@
   Grid Columns:
     - DisplayName
     - PrimarySMTP
+    - MailboxType (User / Shared / Room / Equipment / Other)
     - SOA Status (Online / On-Prem / Unknown)
     - DirSynced
 
-  UI Enhancement:
+  UI Enhancements:
     - Rows with SOA Status = Online are highlighted light green (when not selected)
 
 REFERENCE
@@ -37,12 +38,11 @@ REQUIREMENTS
   - Module: ExchangeOnlineManagement
 
 AUTHOR
-  Peter Schmidt (www.msdigest.net)
+  Peter Schmidt (msdigest.net)
 
 VERSION
-  2.5.9 (2026-01-06)
-    - Add SOA filter dropdown: All / Online / On-Prem (default All)
-    - Highlight rows with SOAStatus=Online in light green
+  2.6.0 (2026-01-06)
+    - Add MailboxType column (User/Shared/Room/Equipment/Other) based on RecipientTypeDetails
 #>
 
 #region PS7 Requirement
@@ -64,8 +64,8 @@ try {
 #endregion
 
 #region Globals
-$Script:ToolName      = "Exchange Mailbox SOA Manager"
-$Script:ScriptVersion = "2.5.9"
+$Script:ToolName      = "Mailbox SOA Manager"
+$Script:ScriptVersion = "2.6.0"
 $Script:RunId         = [Guid]::NewGuid().ToString()
 
 $Script:LogDir   = Join-Path -Path (Get-Location) -ChildPath "Logs"
@@ -90,12 +90,14 @@ $Script:SelectedIdentity = $null
 class MailboxGridRow {
     [string]$DisplayName
     [string]$PrimarySMTP
+    [string]$MailboxType
     [string]$SOAStatus
     [string]$DirSynced
 
-    MailboxGridRow([string]$displayName, [string]$primarySmtp, [string]$soaStatus, [string]$dirSynced) {
+    MailboxGridRow([string]$displayName, [string]$primarySmtp, [string]$mailboxType, [string]$soaStatus, [string]$dirSynced) {
         $this.DisplayName = $displayName
         $this.PrimarySMTP = $primarySmtp
+        $this.MailboxType = $mailboxType
         $this.SOAStatus   = $soaStatus
         $this.DirSynced   = $dirSynced
     }
@@ -198,6 +200,24 @@ function Get-SOAStatus {
     return "Unknown"
 }
 
+function Get-MailboxTypeFriendly {
+    param([object]$RecipientTypeDetails)
+
+    $rtd = ""
+    if ($RecipientTypeDetails) { $rtd = [string]$RecipientTypeDetails }
+
+    switch ($rtd) {
+        "UserMailbox"      { return "User" }
+        "SharedMailbox"    { return "Shared" }
+        "RoomMailbox"      { return "Room" }
+        "EquipmentMailbox" { return "Equipment" }
+        default {
+            if ([string]::IsNullOrWhiteSpace($rtd)) { return "Other" }
+            return "Other ($rtd)"
+        }
+    }
+}
+
 function Text-Matches {
     param([object]$Text,[string]$Query)
     if ([string]::IsNullOrWhiteSpace($Query)) { return $true }
@@ -242,7 +262,7 @@ function Get-AllMailboxesSafe {
     Write-Log "Get-AllMailboxesSafe: Using Get-Mailbox -ResultSize Unlimited" "INFO"
 
     $raw = @(Get-Mailbox -ResultSize Unlimited -ErrorAction Stop |
-        Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged)
+        Select-Object DisplayName,PrimarySmtpAddress,RecipientTypeDetails,IsDirSynced,IsExchangeCloudManaged)
 
     Write-Log "Get-AllMailboxesSafe: Get-Mailbox returned count=$($raw.Count)" "INFO"
     return $raw
@@ -254,11 +274,12 @@ function Convert-ToRow {
     $smtp = ""
     if ($MailboxObject.PrimarySmtpAddress) { $smtp = [string]$MailboxObject.PrimarySmtpAddress }
 
-    $dn  = [string]$MailboxObject.DisplayName
-    $soa = (Get-SOAStatus $MailboxObject.IsExchangeCloudManaged)
-    $ds  = if ($null -eq $MailboxObject.IsDirSynced) { "" } else { [string]$MailboxObject.IsDirSynced }
+    $dn    = [string]$MailboxObject.DisplayName
+    $type  = Get-MailboxTypeFriendly $MailboxObject.RecipientTypeDetails
+    $soa   = Get-SOAStatus $MailboxObject.IsExchangeCloudManaged
+    $ds    = if ($null -eq $MailboxObject.IsDirSynced) { "" } else { [string]$MailboxObject.IsDirSynced }
 
-    return [MailboxGridRow]::new($dn, $smtp, $soa, $ds)
+    return [MailboxGridRow]::new($dn, $smtp, $type, $soa, $ds)
 }
 #endregion
 
@@ -273,9 +294,9 @@ function Set-MailboxSOACloudManaged {
     $targetValue = [bool]$EnableCloudManaged
 
     $before = Get-Mailbox -Identity $Identity -ErrorAction Stop |
-        Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
+        Select-Object DisplayName,PrimarySmtpAddress,RecipientTypeDetails,IsDirSynced,IsExchangeCloudManaged
 
-    Write-Log "SOA change requested for '$Identity'. TargetIsExchangeCloudManaged=$targetValue (Before=$($before.IsExchangeCloudManaged); IsDirSynced=$($before.IsDirSynced))" "INFO"
+    Write-Log "SOA change requested for '$Identity'. TargetIsExchangeCloudManaged=$targetValue (Before=$($before.IsExchangeCloudManaged); IsDirSynced=$($before.IsDirSynced); Type=$($before.RecipientTypeDetails))" "INFO"
 
     if ($before.IsDirSynced -ne $true) {
         $msg = "Mailbox '$Identity' is not DirSynced (IsDirSynced=$($before.IsDirSynced)). Change blocked."
@@ -293,7 +314,7 @@ function Set-MailboxSOACloudManaged {
     Write-Log "Set-Mailbox executed for '$Identity' IsExchangeCloudManaged=$targetValue" "INFO"
 
     $after = Get-Mailbox -Identity $Identity -ErrorAction Stop |
-        Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
+        Select-Object DisplayName,PrimarySmtpAddress,RecipientTypeDetails,IsDirSynced,IsExchangeCloudManaged
 
     $changed = ($after.IsExchangeCloudManaged -eq $targetValue)
     Write-Log "SOA change result for '$Identity'. Before=$($before.IsExchangeCloudManaged) After=$($after.IsExchangeCloudManaged) Expected=$targetValue Success=$changed" "INFO"
@@ -306,13 +327,6 @@ function Set-MailboxSOACloudManaged {
 #endregion
 
 #region Paging + filter/search
-function Reset-ViewToCache {
-    $Script:CurrentView = @($Script:MailboxCache)
-    $Script:PageIndex = 0
-    $Script:CurrentQueryText = ""
-    $Script:CurrentFilter = "All"
-}
-
 function Apply-SearchAndFilterToCache {
     param(
         [string]$QueryText,
@@ -465,7 +479,7 @@ try {
     $lblConn.AutoSize = $true
 
     $btnOpenLog = New-Object System.Windows.Forms.Button
-    $btnOpenLog.Text = "View Logfile"
+    $btnOpenLog.Text = "Open log"
     $btnOpenLog.Location = New-Object System.Drawing.Point(960, 10)
     $btnOpenLog.Size = New-Object System.Drawing.Size(110, 30)
 
@@ -601,6 +615,12 @@ try {
     $col2.HeaderText = "PrimarySMTP"
     $col2.DataPropertyName = "PrimarySMTP"
     $grid.Columns.Add($col2) | Out-Null
+
+    $colType = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $colType.Name = "MailboxType"
+    $colType.HeaderText = "MailboxType"
+    $colType.DataPropertyName = "MailboxType"
+    $grid.Columns.Add($colType) | Out-Null
 
     $col3 = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
     $col3.Name = "SOAStatus"
@@ -930,7 +950,7 @@ try {
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         try {
             $mbx = Get-Mailbox -Identity $Script:SelectedIdentity -ErrorAction Stop |
-                Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
+                Select-Object DisplayName,PrimarySmtpAddress,RecipientTypeDetails,IsDirSynced,IsExchangeCloudManaged
 
             $updated = Convert-ToRow $mbx
             for ($i=0; $i -lt $Script:MailboxCache.Count; $i++) {
@@ -1011,7 +1031,14 @@ try {
         Write-Log "Application closed." "INFO"
     })
 
-    Set-UiConnectedState -Connected $false
+    # Initial UI state
+    $btnConnect.Enabled = $true
+    $btnDisconnect.Enabled = $false
+    $btnLoadAll.Enabled = $false
+    $btnSearch.Enabled = $false
+    $cmbPageSize.Enabled = $false
+    $cmbFilter.Enabled = $false
+    $lblConn.Text = "Status: Not connected"
 
     Write-Log "GUI starting (Application.Run)..." "INFO"
     [System.Windows.Forms.Application]::Run($form)
