@@ -13,38 +13,39 @@
     - SOA Status
     - DirSynced
 
-  Also shows tenant name + mailbox count after connect.
-  Includes "Open log" button.
+  Adds:
+    - Connect/Disconnect
+    - Load all mailboxes into cache (browse/select)
+    - Search/filter against cache (fast)
+    - Show tenant name after connect
+    - Show mailbox count in tenant
+    - Open log file button
 
 REFERENCE
   https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
 
 LOGGING
   - Single logfile (append-only)
-  - Timestamp for each line
+  - Timestamp for each log line
 
 REQUIREMENTS
-  - Windows PowerShell 5.1 or PowerShell 7+, must run in STA
+  - Windows PowerShell 5.1 or PowerShell 7+, must run in STA for WinForms
   - ExchangeOnlineManagement module
 
 AUTHOR
   Peter Schmidt
 
 VERSION
-  2.5.1 (2026-01-05)
-    - Removed results/details panels; only GridView + actions
-    - Grid columns: DisplayName, PrimarySMTP, SOA Status, DirSynced
-    - Show tenant name + mailbox count after connect
-    - Removed Export JSON
-    - Added Open log button
+  2.5.2 (2026-01-05)
 #>
 
 #region STA check
 try {
     if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
         Write-Warning "This GUI must run in STA mode."
-        Write-Warning "Run: powershell.exe -STA -File .\SOA-MailboxTool-GUI.ps1"
-        Write-Warning "  or: pwsh.exe -STA -File .\SOA-MailboxTool-GUI.ps1"
+        Write-Warning "Run:"
+        Write-Warning "  powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\SOA-MailboxTool-GUI.ps1"
+        Write-Warning "  pwsh.exe      -NoProfile -ExecutionPolicy Bypass -STA -File .\SOA-MailboxTool-GUI.ps1"
         return
     }
 } catch { }
@@ -58,7 +59,7 @@ Add-Type -AssemblyName System.Drawing
 
 #region Globals
 $Script:ToolName      = "SOA Mailbox Tool"
-$Script:ScriptVersion = "2.5.1"
+$Script:ScriptVersion = "2.5.2"
 
 $Script:LogDir   = Join-Path -Path (Get-Location) -ChildPath "Logs"
 $Script:LogFile  = Join-Path -Path $Script:LogDir -ChildPath "SOA-MailboxTool.log"
@@ -67,7 +68,8 @@ $Script:IsConnected  = $false
 $Script:TenantName   = "Unknown"
 $Script:MailboxCount = 0
 
-$Script:LastQuery = ""
+$Script:MailboxCache = @()  # full cache objects
+$Script:ViewRows     = @()  # current filtered view objects
 
 New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null
 #endregion
@@ -118,9 +120,10 @@ function Get-TenantNameBestEffort {
 }
 
 function Get-MailboxCountBestEffort {
+    # Best effort count. May take time in large tenants.
     try {
-        $exoCmd = Get-Command Get-EXOMailbox -ErrorAction SilentlyContinue
-        if ($exoCmd) {
+        $cmd = Get-Command Get-EXOMailbox -ErrorAction SilentlyContinue
+        if ($cmd) {
             return [int]((Get-EXOMailbox -ResultSize Unlimited -ErrorAction Stop | Measure-Object).Count)
         }
     } catch {
@@ -179,42 +182,109 @@ function Disconnect-EXO {
 }
 #endregion
 
-#region SOA helpers + mailbox search
-function Get-SOAStatus {
-    param($m)
+#region SOA helpers
+function Get-SOAStatusFromValues {
+    param([bool]$IsDirSynced, $IsExchangeCloudManaged)
 
-    if ($m.IsDirSynced -ne $true) { return "N/A" }
-    if ($m.IsExchangeCloudManaged -eq $true)  { return "Online" }
-    if ($m.IsExchangeCloudManaged -eq $false) { return "On-Prem" }
+    if ($IsDirSynced -ne $true) { return "N/A" }
+    if ($IsExchangeCloudManaged -eq $true)  { return "Online" }
+    if ($IsExchangeCloudManaged -eq $false) { return "On-Prem" }
     return "Unknown"
 }
+#endregion
 
-function Search-MailboxesForGrid {
-    param(
-        [Parameter(Mandatory)][string]$QueryText,
-        [int]$Max = 500
-    )
+#region Mailbox cache/load/search + actions
+function Load-AllMailboxesToCache {
     if (-not $Script:IsConnected) { throw "Not connected." }
 
-    $q = ($QueryText ?? "").Trim()
-    if ([string]::IsNullOrWhiteSpace($q)) { return @() }
+    $cmdExo = Get-Command Get-EXOMailbox -ErrorAction SilentlyContinue
 
-    # OPATH filter (best effort, faster than client-side)
-    $filter = "DisplayName -like '*$q*' -or Alias -like '*$q*' -or PrimarySmtpAddress -like '*$q*'"
-
-    $items = Get-Mailbox -ResultSize $Max -Filter $filter -ErrorAction Stop |
-        Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged
-
-    $rows = foreach ($m in $items) {
-        [PSCustomObject]@{
-            DisplayName  = [string]$m.DisplayName
-            PrimarySMTP  = [string]$m.PrimarySmtpAddress
-            'SOA Status' = (Get-SOAStatus $m)
-            DirSynced    = if ($m.IsDirSynced -eq $true) { "Yes" } else { "No" }
+    $raw = @()
+    if ($cmdExo) {
+        # Use Get-EXOMailbox when available (faster, modern)
+        try {
+            # Try with -Properties first (supported in modern module versions)
+            $raw = @(Get-EXOMailbox -ResultSize Unlimited -Properties DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged -ErrorAction Stop)
+        } catch {
+            # Fallback without -Properties
+            $raw = @(Get-EXOMailbox -ResultSize Unlimited -ErrorAction Stop)
         }
+    } else {
+        # Fallback legacy
+        $raw = @(Get-Mailbox -ResultSize Unlimited -ErrorAction Stop)
     }
 
-    return @($rows)
+    $cache = New-Object System.Collections.Generic.List[object]
+
+    foreach ($m in $raw) {
+        if ($null -eq $m) { continue }
+
+        # Safe access
+        $dn   = [string]$m.DisplayName
+        $smtp = [string]$m.PrimarySmtpAddress
+        $dir  = $false
+        try { $dir = [bool]$m.IsDirSynced } catch { $dir = $false }
+
+        $cloud = $null
+        try { $cloud = $m.IsExchangeCloudManaged } catch { $cloud = $null }
+
+        $soa = Get-SOAStatusFromValues -IsDirSynced $dir -IsExchangeCloudManaged $cloud
+
+        # Keep extra fields for actions/refresh
+        $obj = [pscustomobject]@{
+            DisplayName          = $dn
+            PrimarySMTP          = $smtp
+            'SOA Status'         = $soa
+            DirSynced            = if ($dir) { "Yes" } else { "No" }
+
+            # hidden/useful fields
+            _IsDirSynced         = $dir
+            _IsExchangeCloudManaged = $cloud
+            _Identity            = if ($smtp) { $smtp } else { [string]$m.Identity }
+        }
+        [void]$cache.Add($obj)
+    }
+
+    $Script:MailboxCache = @($cache)
+    return $Script:MailboxCache
+}
+
+function Apply-FilterToCache {
+    param([string]$FilterText)
+
+    $q = ""
+    if ($FilterText) { $q = $FilterText.Trim() }
+
+    if ([string]::IsNullOrWhiteSpace($q)) {
+        $Script:ViewRows = $Script:MailboxCache
+        return $Script:ViewRows
+    }
+
+    $lower = $q.ToLowerInvariant()
+    $Script:ViewRows = @(
+        $Script:MailboxCache | Where-Object {
+            ($_.DisplayName  -and $_.DisplayName.ToLowerInvariant().Contains($lower)) -or
+            ($_.PrimarySMTP  -and $_.PrimarySMTP.ToLowerInvariant().Contains($lower)) -or
+            ($_.('SOA Status') -and $_.('SOA Status').ToLowerInvariant().Contains($lower)) -or
+            ($_.DirSynced    -and $_.DirSynced.ToLowerInvariant().Contains($lower))
+        }
+    )
+
+    return $Script:ViewRows
+}
+
+function Get-SelectedIdentitiesFromGrid {
+    param([System.Windows.Forms.DataGridView]$Grid)
+
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $Grid.SelectedRows) {
+        try {
+            # We bind to objects with _Identity
+            $obj = $r.DataBoundItem
+            if ($obj -and $obj._Identity) { [void]$list.Add([string]$obj._Identity) }
+        } catch { }
+    }
+    return @($list | Select-Object -Unique)
 }
 
 function Set-MailboxSOA {
@@ -241,132 +311,186 @@ function Set-MailboxSOA {
 }
 #endregion
 
-#region GUI layout
+#region GUI
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "{0} v{1}" -f $Script:ToolName, $Script:ScriptVersion
-$form.Size = New-Object System.Drawing.Size(1000, 650)
+$form.Size = New-Object System.Drawing.Size(1100, 720)
 $form.StartPosition = "CenterScreen"
+$form.BackColor = [System.Drawing.Color]::FromArgb(245,245,245)
 
-# Top controls
+# Layout container
+$layout = New-Object System.Windows.Forms.TableLayoutPanel
+$layout.Dock = "Fill"
+$layout.RowCount = 4
+$layout.ColumnCount = 1
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 48)))  | Out-Null  # top bar
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 46)))  | Out-Null  # search/load bar
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))  | Out-Null  # grid
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 56)))  | Out-Null  # actions
+$form.Controls.Add($layout)
+
+# --- Top bar
+$topBar = New-Object System.Windows.Forms.Panel
+$topBar.Dock = "Fill"
+$topBar.BackColor = [System.Drawing.Color]::White
+
 $btnConnect = New-Object System.Windows.Forms.Button
 $btnConnect.Text = "Connect"
-$btnConnect.Location = New-Object System.Drawing.Point(12, 12)
 $btnConnect.Size = New-Object System.Drawing.Size(110, 30)
+$btnConnect.Location = New-Object System.Drawing.Point(10, 9)
 
 $btnDisconnect = New-Object System.Windows.Forms.Button
 $btnDisconnect.Text = "Disconnect"
-$btnDisconnect.Location = New-Object System.Drawing.Point(130, 12)
 $btnDisconnect.Size = New-Object System.Drawing.Size(110, 30)
+$btnDisconnect.Location = New-Object System.Drawing.Point(128, 9)
 $btnDisconnect.Enabled = $false
 
 $btnOpenLog = New-Object System.Windows.Forms.Button
 $btnOpenLog.Text = "Open log"
-$btnOpenLog.Location = New-Object System.Drawing.Point(248, 12)
 $btnOpenLog.Size = New-Object System.Drawing.Size(110, 30)
+$btnOpenLog.Location = New-Object System.Drawing.Point(246, 9)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = "Status: Not connected"
-$lblStatus.Location = New-Object System.Drawing.Point(370, 18)
 $lblStatus.AutoSize = $true
+$lblStatus.Location = New-Object System.Drawing.Point(370, 14)
 
-# Search controls
-$txtSearch = New-Object System.Windows.Forms.TextBox
-$txtSearch.Location = New-Object System.Drawing.Point(12, 55)
-$txtSearch.Size = New-Object System.Drawing.Size(740, 25)
-$txtSearch.Enabled = $false
+$topBar.Controls.AddRange(@($btnConnect,$btnDisconnect,$btnOpenLog,$lblStatus))
+$layout.Controls.Add($topBar, 0, 0)
 
-$btnSearch = New-Object System.Windows.Forms.Button
-$btnSearch.Text = "Search"
-$btnSearch.Location = New-Object System.Drawing.Point(760, 52)
-$btnSearch.Size = New-Object System.Drawing.Size(100, 30)
-$btnSearch.Enabled = $false
+# --- Search/load bar
+$searchBar = New-Object System.Windows.Forms.Panel
+$searchBar.Dock = "Fill"
+$searchBar.BackColor = [System.Drawing.Color]::FromArgb(250,250,250)
+
+$btnLoadAll = New-Object System.Windows.Forms.Button
+$btnLoadAll.Text = "Load all mailboxes"
+$btnLoadAll.Size = New-Object System.Drawing.Size(160, 30)
+$btnLoadAll.Location = New-Object System.Drawing.Point(10, 8)
+$btnLoadAll.Enabled = $false
+
+$txtFilter = New-Object System.Windows.Forms.TextBox
+$txtFilter.Size = New-Object System.Drawing.Size(520, 25)
+$txtFilter.Location = New-Object System.Drawing.Point(182, 10)
+$txtFilter.Enabled = $false
+
+$btnApplyFilter = New-Object System.Windows.Forms.Button
+$btnApplyFilter.Text = "Search"
+$btnApplyFilter.Size = New-Object System.Drawing.Size(90, 30)
+$btnApplyFilter.Location = New-Object System.Drawing.Point(710, 8)
+$btnApplyFilter.Enabled = $false
 
 $btnClear = New-Object System.Windows.Forms.Button
 $btnClear.Text = "Clear"
-$btnClear.Location = New-Object System.Drawing.Point(868, 52)
-$btnClear.Size = New-Object System.Drawing.Size(100, 30)
+$btnClear.Size = New-Object System.Drawing.Size(90, 30)
+$btnClear.Location = New-Object System.Drawing.Point(808, 8)
 $btnClear.Enabled = $false
 
-$lblCount = New-Object System.Windows.Forms.Label
-$lblCount.Text = "Mailboxes shown: 0"
-$lblCount.Location = New-Object System.Drawing.Point(12, 86)
-$lblCount.AutoSize = $true
+$lblCounts = New-Object System.Windows.Forms.Label
+$lblCounts.Text = "Cached: 0 | Showing: 0"
+$lblCounts.AutoSize = $true
+$lblCounts.Location = New-Object System.Drawing.Point(910, 14)
 
-# GridView (DataGridView)
+$searchBar.Controls.AddRange(@($btnLoadAll,$txtFilter,$btnApplyFilter,$btnClear,$lblCounts))
+$layout.Controls.Add($searchBar, 0, 1)
+
+# --- Grid (DataGridView) (this is the real gridview)
+$gridPanel = New-Object System.Windows.Forms.Panel
+$gridPanel.Dock = "Fill"
+$gridPanel.BackColor = [System.Drawing.Color]::FromArgb(245,245,245)
+
 $grid = New-Object System.Windows.Forms.DataGridView
-$grid.Location = New-Object System.Drawing.Point(12, 110)
-$grid.Size = New-Object System.Drawing.Size(956, 420)
+$grid.Dock = "Fill"
+$grid.BackgroundColor = [System.Drawing.Color]::White
+$grid.BorderStyle = "FixedSingle"
 $grid.ReadOnly = $true
 $grid.AllowUserToAddRows = $false
 $grid.AllowUserToDeleteRows = $false
 $grid.SelectionMode = "FullRowSelect"
 $grid.MultiSelect = $true
-$grid.AutoSizeColumnsMode = "Fill"
-$grid.AutoGenerateColumns = $true
+$grid.AutoGenerateColumns = $false
+$grid.RowHeadersVisible = $false
+$grid.EnableHeadersVisualStyles = $false
+$grid.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(243,243,243)
+$grid.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 
-# Action buttons (operate on selected rows)
+# Define columns explicitly (prevents the "grey box with nothing useful")
+function Add-GridColumn([string]$Header, [string]$Prop, [int]$Width = 200) {
+    $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col.HeaderText = $Header
+    $col.DataPropertyName = $Prop
+    $col.Width = $Width
+    $col.AutoSizeMode = "Fill"
+    return $col
+}
+[void]$grid.Columns.Add((Add-GridColumn "DisplayName"  "DisplayName"  300))
+[void]$grid.Columns.Add((Add-GridColumn "PrimarySMTP"  "PrimarySMTP"  260))
+[void]$grid.Columns.Add((Add-GridColumn "SOA Status"   "SOA Status"   140))
+[void]$grid.Columns.Add((Add-GridColumn "DirSynced"    "DirSynced"    100))
+
+$gridPanel.Controls.Add($grid)
+$layout.Controls.Add($gridPanel, 0, 2)
+
+# --- Actions bar
+$actionBar = New-Object System.Windows.Forms.Panel
+$actionBar.Dock = "Fill"
+$actionBar.BackColor = [System.Drawing.Color]::White
+
 $btnEnable = New-Object System.Windows.Forms.Button
-$btnEnable.Text = "Enable cloud SOA (Online)"
-$btnEnable.Location = New-Object System.Drawing.Point(12, 545)
-$btnEnable.Size = New-Object System.Drawing.Size(230, 35)
+$btnEnable.Text = "Enable SOA -> Online"
+$btnEnable.Size = New-Object System.Drawing.Size(190, 34)
+$btnEnable.Location = New-Object System.Drawing.Point(10, 10)
 $btnEnable.Enabled = $false
 
 $btnRevert = New-Object System.Windows.Forms.Button
-$btnRevert.Text = "Revert to on-prem SOA"
-$btnRevert.Location = New-Object System.Drawing.Point(250, 545)
-$btnRevert.Size = New-Object System.Drawing.Size(230, 35)
+$btnRevert.Text = "Revert SOA -> On-Prem"
+$btnRevert.Size = New-Object System.Drawing.Size(200, 34)
+$btnRevert.Location = New-Object System.Drawing.Point(210, 10)
 $btnRevert.Enabled = $false
 
-$form.Controls.AddRange(@(
-    $btnConnect,$btnDisconnect,$btnOpenLog,$lblStatus,
-    $txtSearch,$btnSearch,$btnClear,$lblCount,
-    $grid,$btnEnable,$btnRevert
-))
-#endregion
+$actionBar.Controls.AddRange(@($btnEnable,$btnRevert))
+$layout.Controls.Add($actionBar, 0, 3)
 
-#region UI helpers
+# Helpers
+function Update-Counts {
+    $cached = 0
+    $showing = 0
+    if ($Script:MailboxCache) { $cached = $Script:MailboxCache.Count }
+    if ($Script:ViewRows) { $showing = $Script:ViewRows.Count }
+    $lblCounts.Text = ("Cached: {0} | Showing: {1}" -f $cached, $showing)
+}
+
 function Set-ConnectedUI {
     param([bool]$Connected)
 
     $btnConnect.Enabled    = -not $Connected
     $btnDisconnect.Enabled = $Connected
-    $txtSearch.Enabled     = $Connected
-    $btnSearch.Enabled     = $Connected
+
+    $btnLoadAll.Enabled    = $Connected
+    $txtFilter.Enabled     = $Connected
+    $btnApplyFilter.Enabled= $Connected
     $btnClear.Enabled      = $Connected
 
-    $btnEnable.Enabled = $false
-    $btnRevert.Enabled = $false
+    $btnEnable.Enabled     = $false
+    $btnRevert.Enabled     = $false
 
     if ($Connected) {
-        $lblStatus.Text = "Status: Connected (Tenant: $($Script:TenantName)) | Mailboxes in tenant: $($Script:MailboxCount)"
+        $lblStatus.Text = ("Status: Connected (Tenant: {0}) | Mailboxes in tenant: {1}" -f $Script:TenantName, $Script:MailboxCount)
     } else {
         $lblStatus.Text = "Status: Not connected"
         $grid.DataSource = $null
-        $lblCount.Text = "Mailboxes shown: 0"
-        $Script:LastQuery = ""
+        $Script:MailboxCache = @()
+        $Script:ViewRows = @()
+        Update-Counts
     }
 }
 
-function Get-SelectedSMTPs {
-    $list = New-Object System.Collections.Generic.List[string]
-    foreach ($r in $grid.SelectedRows) {
-        try {
-            $smtp = $r.Cells["PrimarySMTP"].Value
-            if ($smtp) { [void]$list.Add($smtp.ToString()) }
-        } catch { }
-    }
-    return @($list | Select-Object -Unique)
+function Bind-Grid([object[]]$Rows) {
+    $grid.DataSource = $null
+    $grid.DataSource = $Rows
 }
 
-function Refresh-GridFromLastQuery {
-    if ([string]::IsNullOrWhiteSpace($Script:LastQuery)) { return }
-    $rows = Search-MailboxesForGrid -QueryText $Script:LastQuery -Max 500
-    $grid.DataSource = $rows
-    $lblCount.Text = "Mailboxes shown: $($rows.Count)"
-}
-#endregion
-
-#region Events
+# Events
 $btnOpenLog.Add_Click({
     try {
         if (-not (Test-Path $Script:LogFile)) {
@@ -400,23 +524,21 @@ $btnDisconnect.Add_Click({
     } finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
 })
 
-$btnSearch.Add_Click({
+$btnLoadAll.Add_Click({
     $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     try {
-        $q = ($txtSearch.Text ?? "").Trim()
-        $Script:LastQuery = $q
-        Write-Log "INFO" ("Search query: {0}" -f $q)
+        Write-Log "INFO" "Loading all mailboxes into cache..."
+        $data = Load-AllMailboxesToCache
+        Write-Log "INFO" ("Loaded cache: {0} mailboxes" -f $data.Count)
 
-        $rows = Search-MailboxesForGrid -QueryText $q -Max 500
-        $grid.DataSource = $rows
-        $lblCount.Text = "Mailboxes shown: $($rows.Count)"
-
-        $btnEnable.Enabled = ($rows.Count -gt 0)
-        $btnRevert.Enabled = ($rows.Count -gt 0)
+        # Default view = full cache
+        $Script:ViewRows = $Script:MailboxCache
+        Bind-Grid -Rows $Script:ViewRows
+        Update-Counts
     } catch {
-        Write-Log "ERROR" ("Search failed: {0}" -f $_.Exception.Message)
+        Write-Log "ERROR" ("Load all mailboxes failed: {0}" -f $_.Exception.Message)
         [System.Windows.Forms.MessageBox]::Show(
-            "Search failed.`n`n$($_.Exception.Message)",
+            "Load all mailboxes failed.`n`n$($_.Exception.Message)",
             "Error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
@@ -424,17 +546,42 @@ $btnSearch.Add_Click({
     } finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
 })
 
+$btnApplyFilter.Add_Click({
+    try {
+        if (-not $Script:MailboxCache -or $Script:MailboxCache.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Load all mailboxes first.",
+                "Info",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Information
+            ) | Out-Null
+            return
+        }
+
+        $q = $txtFilter.Text
+        Write-Log "INFO" ("Filter applied: {0}" -f $q)
+
+        $view = Apply-FilterToCache -FilterText $q
+        Bind-Grid -Rows $view
+        Update-Counts
+    } catch {
+        Write-Log "ERROR" ("Filter failed: {0}" -f $_.Exception.Message)
+    }
+})
+
 $btnClear.Add_Click({
-    $txtSearch.Text = ""
-    $Script:LastQuery = ""
-    $grid.DataSource = $null
-    $lblCount.Text = "Mailboxes shown: 0"
-    $btnEnable.Enabled = $false
-    $btnRevert.Enabled = $false
+    $txtFilter.Text = ""
+    if ($Script:MailboxCache) {
+        $Script:ViewRows = $Script:MailboxCache
+        Bind-Grid -Rows $Script:ViewRows
+    } else {
+        $grid.DataSource = $null
+        $Script:ViewRows = @()
+    }
+    Update-Counts
 })
 
 $grid.Add_SelectionChanged({
-    # Enable action buttons only when at least one row is selected
     try {
         $hasSel = ($grid.SelectedRows.Count -gt 0)
         $btnEnable.Enabled = $hasSel
@@ -444,11 +591,11 @@ $grid.Add_SelectionChanged({
 
 $btnEnable.Add_Click({
     try {
-        $targets = Get-SelectedSMTPs
+        $targets = Get-SelectedIdentitiesFromGrid -Grid $grid
         if ($targets.Count -eq 0) { return }
 
         $confirm = [System.Windows.Forms.MessageBox]::Show(
-            ("Enable cloud SOA for {0} mailbox(es)?`n`nThis sets IsExchangeCloudManaged = TRUE." -f $targets.Count),
+            ("Enable SOA -> Online for {0} mailbox(es)?`nThis sets IsExchangeCloudManaged = TRUE." -f $targets.Count),
             "Confirm",
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Question
@@ -456,19 +603,23 @@ $btnEnable.Add_Click({
         if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-
-        foreach ($smtp in $targets) {
+        foreach ($id in $targets) {
             try {
-                Write-Log "INFO" ("Enable cloud SOA: {0}" -f $smtp)
-                [void](Set-MailboxSOA -Identity $smtp -EnableCloudManaged $true)
+                Write-Log "INFO" ("Enable SOA Online: {0}" -f $id)
+                [void](Set-MailboxSOA -Identity $id -EnableCloudManaged $true)
             } catch {
-                Write-Log "ERROR" ("Enable cloud SOA failed for {0}: {1}" -f $smtp, $_.Exception.Message)
+                Write-Log "ERROR" ("Enable failed for {0}: {1}" -f $id, $_.Exception.Message)
             }
         }
 
-        Refresh-GridFromLastQuery
+        # Reload cache to reflect new status
+        $data = Load-AllMailboxesToCache
+        $Script:ViewRows = Apply-FilterToCache -FilterText $txtFilter.Text
+        Bind-Grid -Rows $Script:ViewRows
+        Update-Counts
+
         [System.Windows.Forms.MessageBox]::Show(
-            "Completed. Check log for details.",
+            "Completed. See log for details.",
             "Done",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information
@@ -480,11 +631,11 @@ $btnEnable.Add_Click({
 
 $btnRevert.Add_Click({
     try {
-        $targets = Get-SelectedSMTPs
+        $targets = Get-SelectedIdentitiesFromGrid -Grid $grid
         if ($targets.Count -eq 0) { return }
 
         $confirm = [System.Windows.Forms.MessageBox]::Show(
-            ("Revert SOA to on-prem for {0} mailbox(es)?`n`nThis sets IsExchangeCloudManaged = FALSE." -f $targets.Count),
+            ("Revert SOA -> On-Prem for {0} mailbox(es)?`nThis sets IsExchangeCloudManaged = FALSE." -f $targets.Count),
             "Confirm",
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Warning
@@ -492,19 +643,23 @@ $btnRevert.Add_Click({
         if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-
-        foreach ($smtp in $targets) {
+        foreach ($id in $targets) {
             try {
-                Write-Log "INFO" ("Revert to on-prem SOA: {0}" -f $smtp)
-                [void](Set-MailboxSOA -Identity $smtp -EnableCloudManaged $false)
+                Write-Log "INFO" ("Revert SOA On-Prem: {0}" -f $id)
+                [void](Set-MailboxSOA -Identity $id -EnableCloudManaged $false)
             } catch {
-                Write-Log "ERROR" ("Revert SOA failed for {0}: {1}" -f $smtp, $_.Exception.Message)
+                Write-Log "ERROR" ("Revert failed for {0}: {1}" -f $id, $_.Exception.Message)
             }
         }
 
-        Refresh-GridFromLastQuery
+        # Reload cache to reflect new status
+        $data = Load-AllMailboxesToCache
+        $Script:ViewRows = Apply-FilterToCache -FilterText $txtFilter.Text
+        Bind-Grid -Rows $Script:ViewRows
+        Update-Counts
+
         [System.Windows.Forms.MessageBox]::Show(
-            "Completed. Check log for details.",
+            "Completed. See log for details.",
             "Done",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information
@@ -518,10 +673,10 @@ $form.Add_FormClosing({
     try { Disconnect-EXO } catch { }
 })
 
-#endregion
-
 # Init
 Write-Log "INFO" ("{0} v{1} started." -f $Script:ToolName, $Script:ScriptVersion)
 Set-ConnectedUI -Connected $false
+Update-Counts
 
 [System.Windows.Forms.Application]::Run($form)
+#endregion
