@@ -26,7 +26,7 @@ This tool provides a safe GUI-based way to:
 - Log all changes to a single logfile for auditing and troubleshooting
 
 ---
-##Requirements
+## Requirements
 
 ### PowerShell
 - **PowerShell 7+** required (`pwsh.exe`)
