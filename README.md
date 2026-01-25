@@ -104,4 +104,5 @@ Safety behavior:
 
 
 ```powershell
+How to run:
 pwsh.exe -STA -ExecutionPolicy Bypass -File .\MailboxSOAManager-GUI.ps1
