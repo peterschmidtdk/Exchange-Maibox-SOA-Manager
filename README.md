@@ -104,7 +104,6 @@ Safety behavior:
 
 ---
 
-
+How to run the script
 ```powershell
-
 pwsh.exe -STA -ExecutionPolicy Bypass -File .\Exchange-Mailbox-SOA-Manager-GUI.ps1
