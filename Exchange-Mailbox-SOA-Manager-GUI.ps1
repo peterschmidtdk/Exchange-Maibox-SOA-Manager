@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Mailbox SOA Manager (GUI) for Exchange Online - Cloud-managed Exchange attributes (SOA) toggle.
+  Exchange Mailbox SOA Manager (GUI) for Exchange Online - Cloud-managed Exchange attributes (SOA) toggle.
 
 .DESCRIPTION
   GUI tool to view and change mailbox Exchange attribute SOA state via IsExchangeCloudManaged:
@@ -47,14 +47,14 @@ AUTHOR
   Peter Schmidt (msdigest.net)
 
 VERSION
-  2.7.0 (2026-01-06)
+  2.7.1 (2026-01-28)
     - Multi-select in grid + bulk enable/revert for selected mailboxes
     - Enter in Search textbox triggers Search
 #>
 
 #region PS7 Requirement
 if ($PSVersionTable.PSVersion.Major -lt 7) {
-    Write-Error "This tool requires PowerShell 7+. Start with: pwsh.exe -STA -File .\MailboxSOAManager-GUI.ps1"
+    Write-Error "This tool requires PowerShell 7+. Start with: pwsh.exe -STA -File .\Exchange-Mailbox-SOA-Manager-GUI.ps1"
     return
 }
 #endregion
