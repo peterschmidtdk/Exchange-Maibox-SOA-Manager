@@ -13,7 +13,8 @@ It is done by converting the Mailbox State of Authority (SOA) of the mailbox. Ca
 Using the tool 
 - run the tool
 - connect to Exchange Online with Exchange Administrator permissions.
-
+- load mailboxes
+- enable mailboxes for cloud only or revert back to onprem
 
 Microsoft reference:
 - *Enable Exchange attributes in Microsoft Entra ID for cloud management* (Microsoft Learn)  
