@@ -10,7 +10,10 @@ It toggles whether Exchange attributes for a synced mailbox should be managed fr
 
 It is done by converting the Mailbox State of Authority (SOA) of the mailbox. Can be done on individual mailboxes.
 
-Using the tool - connect to Exchange Online with Exchange Administrator permissions.
+Using the tool 
+- run the tool
+- connect to Exchange Online with Exchange Administrator permissions.
+
 
 Microsoft reference:
 - *Enable Exchange attributes in Microsoft Entra ID for cloud management* (Microsoft Learn)  
