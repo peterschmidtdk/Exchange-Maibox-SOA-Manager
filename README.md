@@ -10,6 +10,8 @@ It toggles whether Exchange attributes for a synced mailbox should be managed fr
 
 It is done by converting the Mailbox State of Authority (SOA) of the mailbox. Can be done on individual mailboxes.
 
+![Exchange Mailbox SOA Manager](assets/ExchangeMailboxSOAManager.jpg)
+
 Using the tool 
 - run the tool
 - connect to Exchange Online with Exchange Administrator permissions.
