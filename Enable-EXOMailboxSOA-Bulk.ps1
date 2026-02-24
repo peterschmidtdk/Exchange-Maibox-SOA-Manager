@@ -39,7 +39,6 @@
 .OUTPUTS
     .\Logs\Enable-EXOMailboxSOA_YYYY-MM-DD_HH-mm-ss.log.txt
     .\Exports\Enable-EXOMailboxSOA_Results_YYYY-MM-DD_HH-mm-ss.csv
-
 #>
 
 #region ========================== USER SETTINGS ==========================
