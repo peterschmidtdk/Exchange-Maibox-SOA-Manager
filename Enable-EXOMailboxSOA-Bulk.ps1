@@ -10,6 +10,10 @@
       - Logs everything to transcript + results CSV
       - Shows progress + colored output
 
+    Connection behavior:
+      - If already connected to Exchange Online in the current PowerShell session, it will NOT reconnect.
+      - It will display which tenant it is connected to (best-effort).
+
 .CSV EXAMPLE
     Default path: .\MailboxSOA-Bulk.csv
 
@@ -21,13 +25,14 @@
     aliasOnlyUser,Enable
 
 .NOTES
-    Author: Peter Schmidt
+    Author: Peter
     Script Name: Enable-EXOMailboxSOA-Bulk.ps1
-    Version: 2.0
-    Updated: 2026-02-24
+    Version: 2.1
+    Updated: 2026-02-28
     Requires: ExchangeOnlineManagement module
 
 .CHANGELOG
+    2.1 (2026-02-28) - Skip Connect-ExchangeOnline if already connected; show tenant info.
     2.0 (2026-02-24) - Show version banner at runtime.
     1.9 (2026-02-24) - Missing/empty CSV messages changed from red to purple (Magenta).
     1.8 (2026-02-24) - Fully friendly CSV handling: no raw throw, auto-creates template CSV if missing.
@@ -38,7 +43,7 @@
 
 #region ========================== SCRIPT META ==========================
 $ScriptName    = "Enable-EXOMailboxSOA-Bulk.ps1"
-$ScriptVersion = "2.0"
+$ScriptVersion = "2.1"
 $ScriptUpdated = "2026-02-28"
 #endregion =================================================================
 
@@ -46,7 +51,7 @@ $ScriptUpdated = "2026-02-28"
 $CsvPath     = ".\MailboxSOA-Bulk.csv"
 $WhatIfMode  = $true
 $DefaultMode = "Enable"
-$AdminUPN    = ""
+$AdminUPN    = ""   # optional: specify UPN for Connect-ExchangeOnline
 $LogDir      = ".\Logs"
 $ExportDir   = ".\Exports"
 
@@ -201,6 +206,70 @@ function Invoke-WithRetry {
         }
     }
 }
+
+function Get-EXOConnectionInfo {
+    # Best-effort: works on newer ExchangeOnlineManagement module versions
+    try {
+        if (Get-Command -Name Get-ConnectionInformation -ErrorAction SilentlyContinue) {
+            $ci = Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1
+            return $ci
+        }
+        return $null
+    } catch {
+        return $null
+    }
+}
+
+function Test-EXOConnected {
+    # Prefer Get-ConnectionInformation where available; otherwise do a lightweight call.
+    $ci = Get-EXOConnectionInfo
+    if ($null -ne $ci) {
+        # Property names can vary; try common ones
+        if ($ci.PSObject.Properties.Name -contains "State") {
+            return ([string]$ci.State -match "Connected")
+        }
+        if ($ci.PSObject.Properties.Name -contains "IsConnected") {
+            return [bool]$ci.IsConnected
+        }
+        # If we got something back, assume connected
+        return $true
+    }
+
+    try {
+        # Lightweight call that only works if connected
+        $null = Get-OrganizationConfig -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-EXOTenantLabel {
+    # Best-effort tenant label: prefer Default Accepted Domain; else Org name; else connection info
+    try {
+        $defaultDomain = (Get-AcceptedDomain -ErrorAction Stop | Where-Object { $_.Default -eq $true } | Select-Object -First 1).DomainName
+        if (-not [string]::IsNullOrWhiteSpace($defaultDomain)) { return [string]$defaultDomain }
+    } catch { }
+
+    try {
+        $org = Get-OrganizationConfig -ErrorAction Stop
+        if ($org -and ($org.PSObject.Properties.Name -contains "Name") -and -not [string]::IsNullOrWhiteSpace($org.Name)) {
+            return [string]$org.Name
+        }
+    } catch { }
+
+    $ci = Get-EXOConnectionInfo
+    if ($null -ne $ci) {
+        foreach ($p in @("Organization","DelegatedOrganization","Tenant","TenantId","ConnectionUri","UserPrincipalName")) {
+            if ($ci.PSObject.Properties.Name -contains $p) {
+                $v = [string]$ci.$p
+                if (-not [string]::IsNullOrWhiteSpace($v)) { return $v }
+            }
+        }
+    }
+
+    return "Unknown tenant"
+}
 #endregion =================================================================
 
 #region ========================== STARTUP ================================
@@ -213,8 +282,8 @@ Ensure-Folder -Path $LogDir
 Ensure-Folder -Path $ExportDir
 
 $runStamp = (Get-Date).ToString("yyyy-MM-dd_HH-mm-ss")
-$TranscriptPath = Join-Path $LogDir    "Enable-EXOMailboxSOA_$runStamp.log.txt"
-$ResultsPath    = Join-Path $ExportDir "Enable-EXOMailboxSOA_Results_$runStamp.csv"
+$TranscriptPath = Join-Path $LogDir    "Enable-EXOMailboxSOA_${ScriptVersion}_$runStamp.log.txt"
+$ResultsPath    = Join-Path $ExportDir "Enable-EXOMailboxSOA_Results_${ScriptVersion}_$runStamp.csv"
 
 Start-Transcript -Path $TranscriptPath -Force | Out-Null
 
@@ -229,19 +298,27 @@ if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
 }
 Import-Module ExchangeOnlineManagement -ErrorAction Stop
 
-try {
-    if ([string]::IsNullOrWhiteSpace($AdminUPN)) {
-        Write-Status "Connecting to Exchange Online (interactive)..." "INFO"
-        Connect-ExchangeOnline -ShowBanner:$false
-    } else {
-        Write-Status "Connecting to Exchange Online as $AdminUPN ..." "INFO"
-        Connect-ExchangeOnline -UserPrincipalName $AdminUPN -ShowBanner:$false
+# Connect only if not already connected
+if (Test-EXOConnected) {
+    $tenant = Get-EXOTenantLabel
+    Write-Status "Already connected to Exchange Online. Tenant: $tenant" "OK"
+} else {
+    try {
+        if ([string]::IsNullOrWhiteSpace($AdminUPN)) {
+            Write-Status "Connecting to Exchange Online (interactive)..." "INFO"
+            Connect-ExchangeOnline -ShowBanner:$false
+        } else {
+            Write-Status "Connecting to Exchange Online as $AdminUPN ..." "INFO"
+            Connect-ExchangeOnline -UserPrincipalName $AdminUPN -ShowBanner:$false
+        }
+
+        $tenant = Get-EXOTenantLabel
+        Write-Status "Connected to Exchange Online. Tenant: $tenant" "OK"
+    } catch {
+        Write-Status "Failed to connect to Exchange Online: $($_.Exception.Message)" "ERROR"
+        Stop-Transcript | Out-Null
+        exit 1
     }
-    Write-Status "Connected to Exchange Online." "OK"
-} catch {
-    Write-Status "Failed to connect to Exchange Online: $($_.Exception.Message)" "ERROR"
-    Stop-Transcript | Out-Null
-    exit 1
 }
 
 $rows = Import-Csv -LiteralPath $CsvPath -ErrorAction Stop
@@ -344,6 +421,7 @@ Write-Status "WhatIf:  $whatif" "WARN"
 Write-Status "Skipped: $skipped" "SKIP"
 Write-Status "Errors:  $errors" "ERROR"
 
+# Disconnect is optional; leaving it as-is for now.
 try {
     Disconnect-ExchangeOnline -Confirm:$false
     Write-Status "Disconnected from Exchange Online." "OK"
