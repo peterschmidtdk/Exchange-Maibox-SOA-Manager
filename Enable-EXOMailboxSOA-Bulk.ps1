@@ -13,6 +13,7 @@
     Connection behavior:
       - If already connected to Exchange Online in the current PowerShell session, it will NOT reconnect.
       - It will display which tenant it is connected to (best-effort).
+      - Optional disconnect at the end via $DisconnectWhenDone.
 
 .CSV EXAMPLE
     Default path: .\MailboxSOA-Bulk.csv
@@ -25,13 +26,15 @@
     aliasOnlyUser,Enable
 
 .NOTES
-    Author: Peter
+    Author: Peter Schmidt
     Script Name: Enable-EXOMailboxSOA-Bulk.ps1
-    Version: 2.1
+    Version: 2.3
     Updated: 2026-02-28
     Requires: ExchangeOnlineManagement module
 
 .CHANGELOG
+    2.3 (2026-02-28) - CHANGE output color switched to Green.
+    2.2 (2026-02-28) - Added $DisconnectWhenDone setting.
     2.1 (2026-02-28) - Skip Connect-ExchangeOnline if already connected; show tenant info.
     2.0 (2026-02-24) - Show version banner at runtime.
     1.9 (2026-02-24) - Missing/empty CSV messages changed from red to purple (Magenta).
@@ -43,14 +46,14 @@
 
 #region ========================== SCRIPT META ==========================
 $ScriptName    = "Enable-EXOMailboxSOA-Bulk.ps1"
-$ScriptVersion = "2.1"
+$ScriptVersion = "2.3"
 $ScriptUpdated = "2026-02-28"
 #endregion =================================================================
 
 #region ========================== USER SETTINGS ==========================
-$CsvPath     = ".\MailboxSOA-Bulk.csv"
-$WhatIfMode  = $true
-$DefaultMode = "Enable"
+$CsvPath     = ".\MailboxSOA-Bulk.csv" # CSV with Identity,Mode (Enable/Disable)
+$WhatIfMode  = $true # If true, will not make changes, only log what would be done. Set to $false to apply changes.
+$DefaultMode = "Enable" # If Mode column is empty/whitespace, use this default. Allowed: Enable/Disable (case-insensitive)
 $AdminUPN    = ""   # optional: specify UPN for Connect-ExchangeOnline
 $LogDir      = ".\Logs"
 $ExportDir   = ".\Exports"
@@ -59,9 +62,12 @@ $MaxRetries          = 5
 $InitialDelaySeconds = 2
 $MaxDelaySeconds     = 30
 
-# Purple color choice for friendly input messages:
+# Friendly input (missing/empty CSV) color
 # Options: Magenta or DarkMagenta
-$FriendlyColor = "Magenta"
+$FriendlyColor = "Magenta" 
+
+# Disconnect from Exchange Online when done?
+$DisconnectWhenDone = $false # Set to $false to keep session open after script finishes (for testing/verification)
 #endregion =================================================================
 
 #region ========================== FUNCTIONS ==============================
@@ -73,7 +79,7 @@ function Write-Status {
     $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     switch ($Level) {
         "OK"     { Write-Host "[$ts] [ OK    ] $Message" -ForegroundColor Green }
-        "CHANGE" { Write-Host "[$ts] [ CHANGE] $Message" -ForegroundColor Magenta }
+        "CHANGE" { Write-Host "[$ts] [ CHANGE] $Message" -ForegroundColor Green } # v2.3: was Magenta
         "WARN"   { Write-Host "[$ts] [ WARN  ] $Message" -ForegroundColor Yellow }
         "ERROR"  { Write-Host "[$ts] [ ERROR ] $Message" -ForegroundColor Red }
         "SKIP"   { Write-Host "[$ts] [ SKIP  ] $Message" -ForegroundColor DarkYellow }
@@ -86,7 +92,7 @@ function Show-VersionBanner {
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "  $ScriptName" -ForegroundColor Cyan
     Write-Host "  Version: $ScriptVersion   Updated: $ScriptUpdated   Author: Peter" -ForegroundColor Cyan
-    Write-Host "  WhatIfMode: $WhatIfMode   DefaultMode: $DefaultMode" -ForegroundColor Cyan
+    Write-Host "  WhatIfMode: $WhatIfMode   DefaultMode: $DefaultMode   DisconnectWhenDone: $DisconnectWhenDone" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
 }
@@ -208,11 +214,9 @@ function Invoke-WithRetry {
 }
 
 function Get-EXOConnectionInfo {
-    # Best-effort: works on newer ExchangeOnlineManagement module versions
     try {
         if (Get-Command -Name Get-ConnectionInformation -ErrorAction SilentlyContinue) {
-            $ci = Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1
-            return $ci
+            return (Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1)
         }
         return $null
     } catch {
@@ -221,31 +225,18 @@ function Get-EXOConnectionInfo {
 }
 
 function Test-EXOConnected {
-    # Prefer Get-ConnectionInformation where available; otherwise do a lightweight call.
     $ci = Get-EXOConnectionInfo
     if ($null -ne $ci) {
-        # Property names can vary; try common ones
-        if ($ci.PSObject.Properties.Name -contains "State") {
-            return ([string]$ci.State -match "Connected")
-        }
-        if ($ci.PSObject.Properties.Name -contains "IsConnected") {
-            return [bool]$ci.IsConnected
-        }
-        # If we got something back, assume connected
+        if ($ci.PSObject.Properties.Name -contains "State") { return ([string]$ci.State -match "Connected") }
+        if ($ci.PSObject.Properties.Name -contains "IsConnected") { return [bool]$ci.IsConnected }
         return $true
     }
 
-    try {
-        # Lightweight call that only works if connected
-        $null = Get-OrganizationConfig -ErrorAction Stop
-        return $true
-    } catch {
-        return $false
-    }
+    try { $null = Get-OrganizationConfig -ErrorAction Stop; return $true }
+    catch { return $false }
 }
 
 function Get-EXOTenantLabel {
-    # Best-effort tenant label: prefer Default Accepted Domain; else Org name; else connection info
     try {
         $defaultDomain = (Get-AcceptedDomain -ErrorAction Stop | Where-Object { $_.Default -eq $true } | Select-Object -First 1).DomainName
         if (-not [string]::IsNullOrWhiteSpace($defaultDomain)) { return [string]$defaultDomain }
@@ -298,7 +289,6 @@ if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
 }
 Import-Module ExchangeOnlineManagement -ErrorAction Stop
 
-# Connect only if not already connected
 if (Test-EXOConnected) {
     $tenant = Get-EXOTenantLabel
     Write-Status "Already connected to Exchange Online. Tenant: $tenant" "OK"
@@ -311,7 +301,6 @@ if (Test-EXOConnected) {
             Write-Status "Connecting to Exchange Online as $AdminUPN ..." "INFO"
             Connect-ExchangeOnline -UserPrincipalName $AdminUPN -ShowBanner:$false
         }
-
         $tenant = Get-EXOTenantLabel
         Write-Status "Connected to Exchange Online. Tenant: $tenant" "OK"
     } catch {
@@ -421,12 +410,15 @@ Write-Status "WhatIf:  $whatif" "WARN"
 Write-Status "Skipped: $skipped" "SKIP"
 Write-Status "Errors:  $errors" "ERROR"
 
-# Disconnect is optional; leaving it as-is for now.
-try {
-    Disconnect-ExchangeOnline -Confirm:$false
-    Write-Status "Disconnected from Exchange Online." "OK"
-} catch {
-    Write-Status "Disconnect warning: $($_.Exception.Message)" "WARN"
+if ($DisconnectWhenDone) {
+    try {
+        Disconnect-ExchangeOnline -Confirm:$false
+        Write-Status "Disconnected from Exchange Online (DisconnectWhenDone=True)." "OK"
+    } catch {
+        Write-Status "Disconnect warning: $($_.Exception.Message)" "WARN"
+    }
+} else {
+    Write-Status "Leaving Exchange Online session connected (DisconnectWhenDone=False)." "INFO"
 }
 
 Stop-Transcript | Out-Null
