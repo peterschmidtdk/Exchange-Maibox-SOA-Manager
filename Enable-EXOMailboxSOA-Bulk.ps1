@@ -20,27 +20,16 @@
     room101@contoso.com,Disable
     aliasOnlyUser,Enable
 
-    Notes:
-      - Identity can be UPN / Primary SMTP / Alias (anything Get-Mailbox -Identity accepts)
-      - Mode is optional. If blank, DefaultMode is used.
-
 .NOTES
-    Author: Peter
+    Author: Peter Schmidt
     Script Name: Enable-EXOMailboxSOA-Bulk.ps1
-    Version: 1.8
+    Version: 1.9
     Updated: 2026-02-24
     Requires: ExchangeOnlineManagement module
-    Permissions: Get-Mailbox, Set-Mailbox
-
-.OUTPUTS
-    .\Logs\Enable-EXOMailboxSOA_YYYY-MM-DD_HH-mm-ss.log.txt
-    .\Exports\Enable-EXOMailboxSOA_Results_YYYY-MM-DD_HH-mm-ss.csv
 
 .CHANGELOG
+    1.9 (2026-02-24) - Missing/empty CSV messages changed from red to purple (Magenta).
     1.8 (2026-02-24) - Fully friendly CSV handling: no raw throw, auto-creates template CSV if missing.
-    1.7 (2026-02-24) - Added friendly message on missing/empty CSV.
-    1.6 (2026-02-24) - Fixed all "$var:" parsing issues by using ${var}.
-    1.4 (2026-02-24) - Corrected command to Set-Mailbox -IsExchangeCloudManaged.
 #>
 
 #region ========================== USER SETTINGS ==========================
@@ -54,6 +43,10 @@ $ExportDir   = ".\Exports"
 $MaxRetries          = 5
 $InitialDelaySeconds = 2
 $MaxDelaySeconds     = 30
+
+# Purple color choice for friendly input messages:
+# Options: Magenta or DarkMagenta
+$FriendlyColor = "Magenta"
 #endregion =================================================================
 
 #region ========================== FUNCTIONS ==============================
@@ -105,13 +98,13 @@ function Ensure-FriendlyCsvReady {
 
     if (-not (Test-Path -LiteralPath $Path)) {
         Write-Host ""
-        Write-Host "==================== INPUT FILE MISSING ====================" -ForegroundColor Red
-        Write-Host "I couldn't find the CSV input file here:" -ForegroundColor Red
+        Write-Host "==================== INPUT FILE MISSING ====================" -ForegroundColor $FriendlyColor
+        Write-Host "I couldn't find the CSV input file here:" -ForegroundColor $FriendlyColor
         Write-Host "  $Path" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "I will create a template CSV for you now." -ForegroundColor Cyan
-        Write-Host "Fill in your real users, then run the script again." -ForegroundColor Cyan
-        Write-Host "============================================================" -ForegroundColor Red
+        Write-Host "I will create a template CSV for you now." -ForegroundColor $FriendlyColor
+        Write-Host "Fill in your real users, then run the script again." -ForegroundColor $FriendlyColor
+        Write-Host "============================================================" -ForegroundColor $FriendlyColor
         Write-Host ""
 
         New-TemplateCsv -Path $Path
@@ -119,7 +112,7 @@ function Ensure-FriendlyCsvReady {
         Write-Host "Template created:" -ForegroundColor Green
         Write-Host "  $Path" -ForegroundColor Green
         Write-Host ""
-        Write-Host "Open it, edit identities, then rerun:" -ForegroundColor Cyan
+        Write-Host "Open it, edit identities, then rerun:" -ForegroundColor $FriendlyColor
         Write-Host "  .\Enable-EXOMailboxSOA-Bulk.ps1" -ForegroundColor Gray
         Write-Host ""
         exit 1
@@ -128,12 +121,12 @@ function Ensure-FriendlyCsvReady {
     $content = Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue
     if (-not $content -or $content.Count -lt 2) {
         Write-Host ""
-        Write-Host "==================== INPUT FILE EMPTY ======================" -ForegroundColor Red
-        Write-Host "The CSV exists but is empty (or only headers):" -ForegroundColor Red
+        Write-Host "==================== INPUT FILE EMPTY ======================" -ForegroundColor $FriendlyColor
+        Write-Host "The CSV exists but is empty (or only headers):" -ForegroundColor $FriendlyColor
         Write-Host "  $Path" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "I will overwrite it with a template CSV now." -ForegroundColor Cyan
-        Write-Host "============================================================" -ForegroundColor Red
+        Write-Host "I will overwrite it with a template CSV now." -ForegroundColor $FriendlyColor
+        Write-Host "============================================================" -ForegroundColor $FriendlyColor
         Write-Host ""
 
         New-TemplateCsv -Path $Path
@@ -195,7 +188,6 @@ function Invoke-WithRetry {
 #region ========================== STARTUP ================================
 $ErrorActionPreference = "Stop"
 
-# Fully-friendly CSV handling (no raw throw)
 Ensure-FriendlyCsvReady -Path $CsvPath
 
 Ensure-Folder -Path $LogDir
@@ -207,7 +199,7 @@ $ResultsPath    = Join-Path $ExportDir "Enable-EXOMailboxSOA_Results_$runStamp.c
 
 Start-Transcript -Path $TranscriptPath -Force | Out-Null
 
-Write-Status "Starting Enable-EXOMailboxSOA-Bulk.ps1 v1.8 (WhatIfMode=$WhatIfMode, DefaultMode=$DefaultMode)" "INFO"
+Write-Status "Starting Enable-EXOMailboxSOA-Bulk.ps1 v1.9 (WhatIfMode=$WhatIfMode, DefaultMode=$DefaultMode)" "INFO"
 Write-Status "CSV: $CsvPath" "INFO"
 Write-Status "Transcript: $TranscriptPath" "INFO"
 Write-Status "Results: $ResultsPath" "INFO"
