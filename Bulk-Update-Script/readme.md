@@ -37,11 +37,11 @@ For each row in your CSV, the script:
    - A transcript log file + a results CSV
 5. Shows progress and colored console output.
 
-![Exchange Mailbox SOA Bulk](assets/SOA-Bulk-1.jpg)
+![Exchange Mailbox SOA Bulk](../assets/SOA-Bulk-1.jpg)
 
 Showning stats after the script is run:
 
-![Exchange Mailbox SOA Bulk](assets/SOA-Bulk-2.jpg)
+![Exchange Mailbox SOA Bulk](../assets/SOA-Bulk-2.jpg)
 
 Quality-of-life features included:
 
