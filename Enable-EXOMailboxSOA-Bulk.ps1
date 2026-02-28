@@ -23,17 +23,24 @@
 .NOTES
     Author: Peter Schmidt
     Script Name: Enable-EXOMailboxSOA-Bulk.ps1
-    Version: 1.9
+    Version: 2.0
     Updated: 2026-02-24
     Requires: ExchangeOnlineManagement module
 
 .CHANGELOG
+    2.0 (2026-02-24) - Show version banner at runtime.
     1.9 (2026-02-24) - Missing/empty CSV messages changed from red to purple (Magenta).
     1.8 (2026-02-24) - Fully friendly CSV handling: no raw throw, auto-creates template CSV if missing.
     1.7 (2026-02-24) - Added friendly message on missing/empty CSV.
     1.6 (2026-02-24) - Fixed all "$var:" parsing issues by using ${var}.
     1.4 (2026-02-24) - Corrected command to Set-Mailbox -IsExchangeCloudManaged.
 #>
+
+#region ========================== SCRIPT META ==========================
+$ScriptName    = "Enable-EXOMailboxSOA-Bulk.ps1"
+$ScriptVersion = "2.0"
+$ScriptUpdated = "2026-02-28"
+#endregion =================================================================
 
 #region ========================== USER SETTINGS ==========================
 $CsvPath     = ".\MailboxSOA-Bulk.csv"
@@ -69,6 +76,16 @@ function Write-Status {
     }
 }
 
+function Show-VersionBanner {
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "  $ScriptName" -ForegroundColor Cyan
+    Write-Host "  Version: $ScriptVersion   Updated: $ScriptUpdated   Author: Peter" -ForegroundColor Cyan
+    Write-Host "  WhatIfMode: $WhatIfMode   DefaultMode: $DefaultMode" -ForegroundColor Cyan
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host ""
+}
+
 function Ensure-Folder {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -89,9 +106,7 @@ function New-TemplateCsv {
     )
 
     $dir = Split-Path -Parent $Path
-    if (-not [string]::IsNullOrWhiteSpace($dir)) {
-        Ensure-Folder -Path $dir
-    }
+    if (-not [string]::IsNullOrWhiteSpace($dir)) { Ensure-Folder -Path $dir }
 
     Set-Content -LiteralPath $Path -Value $template -Encoding UTF8
 }
@@ -191,6 +206,7 @@ function Invoke-WithRetry {
 #region ========================== STARTUP ================================
 $ErrorActionPreference = "Stop"
 
+Show-VersionBanner
 Ensure-FriendlyCsvReady -Path $CsvPath
 
 Ensure-Folder -Path $LogDir
@@ -202,10 +218,9 @@ $ResultsPath    = Join-Path $ExportDir "Enable-EXOMailboxSOA_Results_$runStamp.c
 
 Start-Transcript -Path $TranscriptPath -Force | Out-Null
 
-Write-Status "Starting Enable-EXOMailboxSOA-Bulk.ps1 v1.9 (WhatIfMode=$WhatIfMode, DefaultMode=$DefaultMode)" "INFO"
-Write-Status "CSV: $CsvPath" "INFO"
 Write-Status "Transcript: $TranscriptPath" "INFO"
-Write-Status "Results: $ResultsPath" "INFO"
+Write-Status "Results:    $ResultsPath" "INFO"
+Write-Status "CSV:        $CsvPath" "INFO"
 
 if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
     Write-Status "ExchangeOnlineManagement module not found. Install with: Install-Module ExchangeOnlineManagement" "ERROR"
