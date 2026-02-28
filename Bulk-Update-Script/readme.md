@@ -1,3 +1,5 @@
+![Exchange Mailbox SOA Manager](assets/ExchangeMailboxSOAManager.jpg)
+
 # Enable-EXOMailboxSOA-Bulk.ps1
 
 Bulk enable/disable **Exchange mailbox SOA** (Source of Authority) for directory-synchronized mailboxes in **Exchange Online**, based on a simple CSV input file.
@@ -18,3 +20,30 @@ If you are:
 …then you may need to set the mailbox flag that controls whether Exchange Online is the **source of authority** for Exchange mailbox attributes.
 
 This script bulk-updates that mailbox flag using a CSV list.
+
+---
+
+## What it does
+
+For each row in your CSV, the script:
+
+1. Loads the mailbox with `Get-Mailbox`
+2. Checks:
+   - `IsDirSynced` must be `True` (otherwise the row is skipped)
+   - current `IsExchangeCloudManaged` state
+3. If change is needed, sets:
+   - **Enable:** `Set-Mailbox -IsExchangeCloudManaged $true`
+   - **Disable:** `Set-Mailbox -IsExchangeCloudManaged $false`
+4. Logs:
+   - Updates / skips / errors
+   - A transcript log file + a results CSV
+5. Shows progress and colored console output.
+
+It also includes quality-of-life features:
+- **Friendly missing CSV handling** (creates a template file automatically)
+- **Version banner** at startup
+- **Detects existing Exchange Online connection** and skips reconnecting
+- Shows which **tenant** it is connected to (best-effort)
+- Optional **disconnect** at the end via `$DisconnectWhenDone`
+
+---
