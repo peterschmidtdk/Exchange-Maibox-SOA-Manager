@@ -10,10 +10,6 @@
       3) Logs every action (updates, skips, errors) to transcript + CSV
       4) Shows progress + colored status output
 
-    NOTE:
-      - This SOA switch is for directory-synchronized mailboxes (IsDirSynced = True).
-      - Microsoft notes this parameter should not be used together with other parameters in the same Set-Mailbox call.
-
 .CSV EXAMPLE
     Save as: .\MailboxSOA-Bulk.csv
 
@@ -24,40 +20,21 @@
     room101@contoso.com,Disable
     aliasOnlyUser,Enable
 
-    Notes:
-      - Identity can be UPN / Primary SMTP / Alias (anything Get-Mailbox -Identity accepts)
-      - Mode is optional. If blank, DefaultMode is used.
-
 .NOTES
-    Author: Peter Schmidt
+    Author: Peter
     Script Name: Enable-EXOMailboxSOA-Bulk.ps1
-    Version: 1.6
+    Version: 1.7
     Updated: 2026-02-24
     Requires: ExchangeOnlineManagement module
-    Permissions: Get-Mailbox, Set-Mailbox
-
-.OUTPUTS
-    .\Logs\Enable-EXOMailboxSOA_YYYY-MM-DD_HH-mm-ss.log.txt
-    .\Exports\Enable-EXOMailboxSOA_Results_YYYY-MM-DD_HH-mm-ss.csv
 #>
 
 #region ========================== USER SETTINGS ==========================
 $CsvPath = ".\MailboxSOA-Bulk.csv"
-
-# True = simulate only (no changes). False = apply changes.
 $WhatIfMode = $true
-
-# Used if Mode is blank in CSV: Enable or Disable
 $DefaultMode = "Enable"
-
-# Optional: connect as a specific admin UPN (blank = interactive)
 $AdminUPN = ""
-
-# Output paths default to .\
 $LogDir    = ".\Logs"
 $ExportDir = ".\Exports"
-
-# Retry/backoff for transient EXO errors
 $MaxRetries = 5
 $InitialDelaySeconds = 2
 $MaxDelaySeconds = 30
@@ -87,11 +64,48 @@ function Ensure-Folder {
     }
 }
 
-function Assert-FileNotEmpty {
+function Show-FriendlyCsvMissing {
     param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { throw "Input CSV not found: $Path" }
-    $content = Get-Content -LiteralPath $Path -ErrorAction Stop
-    if ($content.Count -lt 2) { throw "Input CSV is empty (or only has headers): $Path" }
+
+    Write-Host ""
+    Write-Host "==================== INPUT FILE MISSING ====================" -ForegroundColor Red
+    Write-Host "I couldn't find the CSV input file here:" -ForegroundColor Red
+    Write-Host "  $Path" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Fix:" -ForegroundColor Cyan
+    Write-Host "  1) Create the file (or copy it) to the folder you run the script from" -ForegroundColor Cyan
+    Write-Host "  2) Or change `$CsvPath at the top of the script to the correct path" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Expected CSV format (example):" -ForegroundColor Cyan
+    Write-Host "  Identity,Mode" -ForegroundColor Gray
+    Write-Host "  user1@contoso.com,Enable" -ForegroundColor Gray
+    Write-Host "  user2@contoso.com,Enable" -ForegroundColor Gray
+    Write-Host "  shared.mailbox@contoso.com,Enable" -ForegroundColor Gray
+    Write-Host "  room101@contoso.com,Disable" -ForegroundColor Gray
+    Write-Host "  aliasOnlyUser,Enable" -ForegroundColor Gray
+    Write-Host "============================================================" -ForegroundColor Red
+    Write-Host ""
+}
+
+function Assert-CsvExistsAndNotEmpty {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Show-FriendlyCsvMissing -Path $Path
+        exit 1
+    }
+
+    $content = Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $content -or $content.Count -lt 2) {
+        Write-Host ""
+        Write-Host "==================== INPUT FILE EMPTY ======================" -ForegroundColor Red
+        Write-Host "The CSV exists but looks empty (or only has headers):" -ForegroundColor Red
+        Write-Host "  $Path" -ForegroundColor Yellow
+        Write-Host "Please add at least one user row under the header." -ForegroundColor Cyan
+        Write-Host "============================================================" -ForegroundColor Red
+        Write-Host ""
+        exit 1
+    }
 }
 
 function Normalize-Mode {
@@ -120,7 +134,6 @@ function Invoke-WithRetry {
             return & $ScriptBlock
         } catch {
             $msg = $_.Exception.Message
-
             $isTransient = (
                 $msg -match "The server is busy" -or
                 $msg -match "temporarily unavailable" -or
@@ -145,9 +158,11 @@ function Invoke-WithRetry {
 #region ========================== STARTUP ================================
 $ErrorActionPreference = "Stop"
 
+# FRIENDLY INPUT CHECK
+Assert-CsvExistsAndNotEmpty -Path $CsvPath
+
 Ensure-Folder -Path $LogDir
 Ensure-Folder -Path $ExportDir
-Assert-FileNotEmpty -Path $CsvPath
 
 $runStamp = (Get-Date).ToString("yyyy-MM-dd_HH-mm-ss")
 $TranscriptPath = Join-Path $LogDir    "Enable-EXOMailboxSOA_$runStamp.log.txt"
@@ -155,13 +170,15 @@ $ResultsPath    = Join-Path $ExportDir "Enable-EXOMailboxSOA_Results_$runStamp.c
 
 Start-Transcript -Path $TranscriptPath -Force | Out-Null
 
-Write-Status "Starting Enable-EXOMailboxSOA-Bulk.ps1 v1.6 (WhatIfMode=$WhatIfMode, DefaultMode=$DefaultMode)" "INFO"
+Write-Status "Starting Enable-EXOMailboxSOA-Bulk.ps1 v1.7 (WhatIfMode=$WhatIfMode, DefaultMode=$DefaultMode)" "INFO"
 Write-Status "CSV: $CsvPath" "INFO"
 Write-Status "Transcript: $TranscriptPath" "INFO"
 Write-Status "Results: $ResultsPath" "INFO"
 
 if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-    throw "ExchangeOnlineManagement module not found. Install with: Install-Module ExchangeOnlineManagement"
+    Write-Status "ExchangeOnlineManagement module not found. Install with: Install-Module ExchangeOnlineManagement" "ERROR"
+    Stop-Transcript | Out-Null
+    exit 1
 }
 Import-Module ExchangeOnlineManagement -ErrorAction Stop
 
@@ -175,12 +192,16 @@ try {
     }
     Write-Status "Connected to Exchange Online." "OK"
 } catch {
-    throw "Failed to connect to Exchange Online. $($_.Exception.Message)"
+    Write-Status "Failed to connect to Exchange Online: $($_.Exception.Message)" "ERROR"
+    Stop-Transcript | Out-Null
+    exit 1
 }
 
 $rows = Import-Csv -LiteralPath $CsvPath -ErrorAction Stop
 if (-not ($rows | Get-Member -Name Identity)) {
-    throw "CSV missing required column: Identity"
+    Write-Status "CSV missing required column: Identity" "ERROR"
+    Stop-Transcript | Out-Null
+    exit 1
 }
 #endregion =================================================================
 
@@ -200,10 +221,7 @@ for ($i = 0; $i -lt $rows.Count; $i++) {
 
     if ([string]::IsNullOrWhiteSpace($id)) {
         Write-Status "[${idx}/${total}] Empty Identity - skipped." "SKIP"
-        $results.Add([pscustomobject]@{
-            Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=""; Mode=""; Result="Skipped"; Reason="Empty Identity";
-            IsDirSynced=""; Before=""; After=""; WhatIf=$WhatIfMode
-        })
+        $results.Add([pscustomobject]@{ Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=""; Mode=""; Result="Skipped"; Reason="Empty Identity"; Before=""; After=""; WhatIf=$WhatIfMode })
         continue
     }
 
@@ -212,10 +230,7 @@ for ($i = 0; $i -lt $rows.Count; $i++) {
     try { $mode = Normalize-Mode -Mode $modeRaw }
     catch {
         Write-Status "[${idx}/${total}] $id - invalid Mode '$modeRaw' - skipped." "SKIP"
-        $results.Add([pscustomobject]@{
-            Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$modeRaw; Result="Skipped"; Reason="Invalid Mode";
-            IsDirSynced=""; Before=""; After=""; WhatIf=$WhatIfMode
-        })
+        $results.Add([pscustomobject]@{ Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$modeRaw; Result="Skipped"; Reason="Invalid Mode"; Before=""; After=""; WhatIf=$WhatIfMode })
         continue
     }
 
@@ -228,11 +243,8 @@ for ($i = 0; $i -lt $rows.Count; $i++) {
         $before = [string]$mbx.IsExchangeCloudManaged
 
         if ($isDirSynced -ne "True") {
-            Write-Status "[${idx}/${total}] Skipped $id - IsDirSynced is not True (IsDirSynced=$isDirSynced)." "SKIP"
-            $results.Add([pscustomobject]@{
-                Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="Skipped";
-                Reason="Not DirSynced"; IsDirSynced=$isDirSynced; Before=$before; After=$before; WhatIf=$WhatIfMode
-            })
+            Write-Status "[${idx}/${total}] Skipped $id - not DirSynced (IsDirSynced=$isDirSynced)." "SKIP"
+            $results.Add([pscustomobject]@{ Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="Skipped"; Reason="Not DirSynced"; Before=$before; After=$before; WhatIf=$WhatIfMode })
             continue
         }
 
@@ -240,19 +252,13 @@ for ($i = 0; $i -lt $rows.Count; $i++) {
 
         if ($before -eq $target) {
             Write-Status "[${idx}/${total}] Skipped $id - already IsExchangeCloudManaged=$target" "SKIP"
-            $results.Add([pscustomobject]@{
-                Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="Skipped";
-                Reason="Already $target"; IsDirSynced=$isDirSynced; Before=$before; After=$before; WhatIf=$WhatIfMode
-            })
+            $results.Add([pscustomobject]@{ Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="Skipped"; Reason="Already $target"; Before=$before; After=$before; WhatIf=$WhatIfMode })
             continue
         }
 
         if ($WhatIfMode) {
             Write-Status "[${idx}/${total}] WHATIF $id -> set IsExchangeCloudManaged=$target" "WARN"
-            $results.Add([pscustomobject]@{
-                Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="WhatIf";
-                Reason="Would set IsExchangeCloudManaged=$target"; IsDirSynced=$isDirSynced; Before=$before; After=$target; WhatIf=$WhatIfMode
-            })
+            $results.Add([pscustomobject]@{ Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="WhatIf"; Reason="Would set IsExchangeCloudManaged=$target"; Before=$before; After=$target; WhatIf=$WhatIfMode })
             continue
         }
 
@@ -262,18 +268,12 @@ for ($i = 0; $i -lt $rows.Count; $i++) {
         } | Out-Null
 
         Write-Status "[${idx}/${total}] Updated $id (Before=$before After=$target)" "CHANGE"
-        $results.Add([pscustomobject]@{
-            Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="Updated"; Reason="";
-            IsDirSynced=$isDirSynced; Before=$before; After=$target; WhatIf=$WhatIfMode
-        })
+        $results.Add([pscustomobject]@{ Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="Updated"; Reason=""; Before=$before; After=$target; WhatIf=$WhatIfMode })
     }
     catch {
         $msg = $_.Exception.Message
         Write-Status "[${idx}/${total}] Error ${id}: $msg" "ERROR"
-        $results.Add([pscustomobject]@{
-            Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$modeRaw; Result="Error"; Reason=$msg;
-            IsDirSynced=""; Before=""; After=""; WhatIf=$WhatIfMode
-        })
+        $results.Add([pscustomobject]@{ Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$modeRaw; Result="Error"; Reason=$msg; Before=""; After=""; WhatIf=$WhatIfMode })
         continue
     }
 }
