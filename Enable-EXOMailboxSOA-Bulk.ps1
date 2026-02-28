@@ -30,6 +30,9 @@
 .CHANGELOG
     1.9 (2026-02-24) - Missing/empty CSV messages changed from red to purple (Magenta).
     1.8 (2026-02-24) - Fully friendly CSV handling: no raw throw, auto-creates template CSV if missing.
+    1.7 (2026-02-24) - Added friendly message on missing/empty CSV.
+    1.6 (2026-02-24) - Fixed all "$var:" parsing issues by using ${var}.
+    1.4 (2026-02-24) - Corrected command to Set-Mailbox -IsExchangeCloudManaged.
 #>
 
 #region ========================== USER SETTINGS ==========================
