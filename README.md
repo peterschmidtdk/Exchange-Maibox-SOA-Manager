@@ -22,6 +22,8 @@ Microsoft reference:
 - *Enable Exchange attributes in Microsoft Entra ID for cloud management* (Microsoft Learn)  
   https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
 
+Want to update i bulk, check out the bulk update script:
+- [Exchange SOA Bulk Script](https://github.com/peterschmidtdk/Exchange-Maibox-SOA-Manager/tree/main/Bulk-Update-Script)
 ---
 
 ## Why this tool exists
