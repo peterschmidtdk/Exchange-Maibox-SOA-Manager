@@ -47,3 +47,34 @@ It also includes quality-of-life features:
 - Optional **disconnect** at the end via `$DisconnectWhenDone`
 
 ---
+
+## Why this exists (the “why”)
+
+Doing these changes manually in the Exchange Admin Center (EAC) for many mailboxes is:
+
+- Slow
+- Error-prone
+- Hard to document
+- Hard to repeat
+
+This script provides:
+
+- Bulk execution from a CSV list
+- Repeatability (run again safely; unchanged objects are skipped)
+- Clear operational visibility (progress + colors)
+- Evidence for change management (logs + results export)
+
+---
+
+## Requirements
+
+### PowerShell
+- Windows PowerShell 5.1 or PowerShell 7+
+
+### Module
+- `ExchangeOnlineManagement`
+
+Install if needed:
+
+```powershell
+Install-Module ExchangeOnlineManagement -Scope CurrentUser
