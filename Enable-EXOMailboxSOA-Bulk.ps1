@@ -3,15 +3,15 @@
     Bulk enable/disable Exchange mailbox SOA (Exchange attribute SOA) for mailboxes in Exchange Online.
 
 .DESCRIPTION
-    Reads a CSV with Identity + optional Mode (Enable/Disable). For each row, the script:
-      1) Reads mailbox state: IsDirSynced + IsExchangeCloudManaged
-      2) If eligible, sets SOA using:
-            Set-Mailbox -Identity <User> -IsExchangeCloudManaged $true / $false
-      3) Logs every action (updates, skips, errors) to transcript + CSV
-      4) Shows progress + colored status output
+    Reads a CSV with Identity + optional Mode (Enable/Disable). For each row:
+      - Reads mailbox: IsDirSynced + IsExchangeCloudManaged
+      - If eligible, sets SOA with:
+            Set-Mailbox -Identity <Identity> -IsExchangeCloudManaged $true / $false
+      - Logs everything to transcript + results CSV
+      - Shows progress + colored output
 
 .CSV EXAMPLE
-    Save as: .\MailboxSOA-Bulk.csv
+    Default path: .\MailboxSOA-Bulk.csv
 
     Identity,Mode
     user1@contoso.com,Enable
@@ -20,24 +20,40 @@
     room101@contoso.com,Disable
     aliasOnlyUser,Enable
 
+    Notes:
+      - Identity can be UPN / Primary SMTP / Alias (anything Get-Mailbox -Identity accepts)
+      - Mode is optional. If blank, DefaultMode is used.
+
 .NOTES
     Author: Peter
     Script Name: Enable-EXOMailboxSOA-Bulk.ps1
-    Version: 1.7
+    Version: 1.8
     Updated: 2026-02-24
     Requires: ExchangeOnlineManagement module
+    Permissions: Get-Mailbox, Set-Mailbox
+
+.OUTPUTS
+    .\Logs\Enable-EXOMailboxSOA_YYYY-MM-DD_HH-mm-ss.log.txt
+    .\Exports\Enable-EXOMailboxSOA_Results_YYYY-MM-DD_HH-mm-ss.csv
+
+.CHANGELOG
+    1.8 (2026-02-24) - Fully friendly CSV handling: no raw throw, auto-creates template CSV if missing.
+    1.7 (2026-02-24) - Added friendly message on missing/empty CSV.
+    1.6 (2026-02-24) - Fixed all "$var:" parsing issues by using ${var}.
+    1.4 (2026-02-24) - Corrected command to Set-Mailbox -IsExchangeCloudManaged.
 #>
 
 #region ========================== USER SETTINGS ==========================
-$CsvPath = ".\MailboxSOA-Bulk.csv"
-$WhatIfMode = $true
+$CsvPath     = ".\MailboxSOA-Bulk.csv"
+$WhatIfMode  = $true
 $DefaultMode = "Enable"
-$AdminUPN = ""
-$LogDir    = ".\Logs"
-$ExportDir = ".\Exports"
-$MaxRetries = 5
+$AdminUPN    = ""
+$LogDir      = ".\Logs"
+$ExportDir   = ".\Exports"
+
+$MaxRetries          = 5
 $InitialDelaySeconds = 2
-$MaxDelaySeconds = 30
+$MaxDelaySeconds     = 30
 #endregion =================================================================
 
 #region ========================== FUNCTIONS ==============================
@@ -64,34 +80,48 @@ function Ensure-Folder {
     }
 }
 
-function Show-FriendlyCsvMissing {
+function New-TemplateCsv {
     param([Parameter(Mandatory)][string]$Path)
 
-    Write-Host ""
-    Write-Host "==================== INPUT FILE MISSING ====================" -ForegroundColor Red
-    Write-Host "I couldn't find the CSV input file here:" -ForegroundColor Red
-    Write-Host "  $Path" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Fix:" -ForegroundColor Cyan
-    Write-Host "  1) Create the file (or copy it) to the folder you run the script from" -ForegroundColor Cyan
-    Write-Host "  2) Or change `$CsvPath at the top of the script to the correct path" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Expected CSV format (example):" -ForegroundColor Cyan
-    Write-Host "  Identity,Mode" -ForegroundColor Gray
-    Write-Host "  user1@contoso.com,Enable" -ForegroundColor Gray
-    Write-Host "  user2@contoso.com,Enable" -ForegroundColor Gray
-    Write-Host "  shared.mailbox@contoso.com,Enable" -ForegroundColor Gray
-    Write-Host "  room101@contoso.com,Disable" -ForegroundColor Gray
-    Write-Host "  aliasOnlyUser,Enable" -ForegroundColor Gray
-    Write-Host "============================================================" -ForegroundColor Red
-    Write-Host ""
+    $template = @(
+        "Identity,Mode"
+        "user1@contoso.com,Enable"
+        "user2@contoso.com,Enable"
+        "shared.mailbox@contoso.com,Enable"
+        "room101@contoso.com,Disable"
+        "aliasOnlyUser,Enable"
+    )
+
+    $dir = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($dir)) {
+        Ensure-Folder -Path $dir
+    }
+
+    Set-Content -LiteralPath $Path -Value $template -Encoding UTF8
 }
 
-function Assert-CsvExistsAndNotEmpty {
+function Ensure-FriendlyCsvReady {
     param([Parameter(Mandatory)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) {
-        Show-FriendlyCsvMissing -Path $Path
+        Write-Host ""
+        Write-Host "==================== INPUT FILE MISSING ====================" -ForegroundColor Red
+        Write-Host "I couldn't find the CSV input file here:" -ForegroundColor Red
+        Write-Host "  $Path" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "I will create a template CSV for you now." -ForegroundColor Cyan
+        Write-Host "Fill in your real users, then run the script again." -ForegroundColor Cyan
+        Write-Host "============================================================" -ForegroundColor Red
+        Write-Host ""
+
+        New-TemplateCsv -Path $Path
+
+        Write-Host "Template created:" -ForegroundColor Green
+        Write-Host "  $Path" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "Open it, edit identities, then rerun:" -ForegroundColor Cyan
+        Write-Host "  .\Enable-EXOMailboxSOA-Bulk.ps1" -ForegroundColor Gray
+        Write-Host ""
         exit 1
     }
 
@@ -99,10 +129,17 @@ function Assert-CsvExistsAndNotEmpty {
     if (-not $content -or $content.Count -lt 2) {
         Write-Host ""
         Write-Host "==================== INPUT FILE EMPTY ======================" -ForegroundColor Red
-        Write-Host "The CSV exists but looks empty (or only has headers):" -ForegroundColor Red
+        Write-Host "The CSV exists but is empty (or only headers):" -ForegroundColor Red
         Write-Host "  $Path" -ForegroundColor Yellow
-        Write-Host "Please add at least one user row under the header." -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "I will overwrite it with a template CSV now." -ForegroundColor Cyan
         Write-Host "============================================================" -ForegroundColor Red
+        Write-Host ""
+
+        New-TemplateCsv -Path $Path
+
+        Write-Host "Template written:" -ForegroundColor Green
+        Write-Host "  $Path" -ForegroundColor Green
         Write-Host ""
         exit 1
     }
@@ -158,8 +195,8 @@ function Invoke-WithRetry {
 #region ========================== STARTUP ================================
 $ErrorActionPreference = "Stop"
 
-# FRIENDLY INPUT CHECK
-Assert-CsvExistsAndNotEmpty -Path $CsvPath
+# Fully-friendly CSV handling (no raw throw)
+Ensure-FriendlyCsvReady -Path $CsvPath
 
 Ensure-Folder -Path $LogDir
 Ensure-Folder -Path $ExportDir
@@ -170,7 +207,7 @@ $ResultsPath    = Join-Path $ExportDir "Enable-EXOMailboxSOA_Results_$runStamp.c
 
 Start-Transcript -Path $TranscriptPath -Force | Out-Null
 
-Write-Status "Starting Enable-EXOMailboxSOA-Bulk.ps1 v1.7 (WhatIfMode=$WhatIfMode, DefaultMode=$DefaultMode)" "INFO"
+Write-Status "Starting Enable-EXOMailboxSOA-Bulk.ps1 v1.8 (WhatIfMode=$WhatIfMode, DefaultMode=$DefaultMode)" "INFO"
 Write-Status "CSV: $CsvPath" "INFO"
 Write-Status "Transcript: $TranscriptPath" "INFO"
 Write-Status "Results: $ResultsPath" "INFO"
@@ -241,14 +278,13 @@ for ($i = 0; $i -lt $rows.Count; $i++) {
 
         $isDirSynced = [string]$mbx.IsDirSynced
         $before = [string]$mbx.IsExchangeCloudManaged
+        $target = if ($mode -eq "Enable") { "True" } else { "False" }
 
         if ($isDirSynced -ne "True") {
             Write-Status "[${idx}/${total}] Skipped $id - not DirSynced (IsDirSynced=$isDirSynced)." "SKIP"
             $results.Add([pscustomobject]@{ Timestamp=(Get-Date).ToString("s"); Row=$idx; Identity=$id; Mode=$mode; Result="Skipped"; Reason="Not DirSynced"; Before=$before; After=$before; WhatIf=$WhatIfMode })
             continue
         }
-
-        $target = if ($mode -eq "Enable") { "True" } else { "False" }
 
         if ($before -eq $target) {
             Write-Status "[${idx}/${total}] Skipped $id - already IsExchangeCloudManaged=$target" "SKIP"
